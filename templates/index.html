@@ -144,6 +144,15 @@
       gap: 18px;
     }
 
+    .mobile-label {
+      display: none;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+
     .character-layout {
       display: grid;
       grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
@@ -323,13 +332,65 @@
     }
 
     @media (max-width: 700px) {
+      body {
+        display: block;
+        padding: 12px;
+      }
+
       .card {
-        padding: 22px;
+        width: 100%;
+        padding: 16px;
+        border-radius: 20px;
       }
 
       .hero {
         align-items: start;
         flex-direction: column;
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        font-size: clamp(1.8rem, 8vw, 2.4rem);
+      }
+
+      .eyebrow {
+        margin-bottom: 6px;
+      }
+
+      .actions {
+        width: 100%;
+        margin: 8px 0 0;
+      }
+
+      .actions .button {
+        width: 100%;
+        text-align: center;
+      }
+
+      .character-tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 6px;
+        margin-bottom: 12px;
+        scrollbar-width: thin;
+      }
+
+      .character-tab {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+
+      .summary-grid,
+      .pi-grid,
+      .colony-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .panel {
+        padding: 16px;
       }
 
       .journal-table,
@@ -346,12 +407,28 @@
 
       .journal-table tr {
         border-top: 1px solid var(--grid);
-        padding: 10px 0;
+        padding: 12px 0;
       }
 
       .journal-table td {
         border: none;
-        padding: 6px 0;
+        padding: 4px 0;
+      }
+
+      .mobile-label {
+        display: block;
+      }
+
+      .cache-note {
+        font-size: 0.86rem;
+      }
+
+      .section-title {
+        margin-bottom: 12px;
+      }
+
+      .stat-value {
+        font-size: clamp(1.2rem, 6vw, 1.7rem);
       }
     }
 
@@ -447,9 +524,18 @@
                     <tbody>
                       {% for character in overview_summary.characters %}
                         <tr>
-                          <td>{{ character.character_name }}</td>
-                          <td>{{ character.next_expiry | eve_time if character.next_expiry else "No active extractors" }}</td>
-                          <td>{{ character.next_expiry | countdown if character.next_expiry else "-" }}</td>
+                          <td>
+                            <span class="mobile-label">Character</span>
+                            {{ character.character_name }}
+                          </td>
+                          <td>
+                            <span class="mobile-label">Next Expiry</span>
+                            {{ character.next_expiry | eve_time if character.next_expiry else "No active extractors" }}
+                          </td>
+                          <td>
+                            <span class="mobile-label">Time Remaining</span>
+                            {{ character.next_expiry | countdown if character.next_expiry else "-" }}
+                          </td>
                         </tr>
                       {% endfor %}
                     </tbody>
@@ -514,13 +600,26 @@
                     <tbody>
                       {% for entry in location_summary.journal_entries %}
                         <tr>
-                          <td>{{ entry.date | eve_time }}</td>
-                          <td>{{ entry.ref_type.replace("_", " ").title() }}</td>
+                          <td>
+                            <span class="mobile-label">Date</span>
+                            {{ entry.date | eve_time }}
+                          </td>
+                          <td>
+                            <span class="mobile-label">Type</span>
+                            {{ entry.ref_type.replace("_", " ").title() }}
+                          </td>
                           <td class="{{ 'amount-negative' if entry.amount < 0 else 'amount-positive' }}">
+                            <span class="mobile-label">Amount</span>
                             {{ entry.amount | isk }}
                           </td>
-                          <td>{{ entry.balance | isk }}</td>
-                          <td>{{ entry.description }}</td>
+                          <td>
+                            <span class="mobile-label">Balance</span>
+                            {{ entry.balance | isk }}
+                          </td>
+                          <td>
+                            <span class="mobile-label">Description</span>
+                            {{ entry.description }}
+                          </td>
                         </tr>
                       {% endfor %}
                     </tbody>
