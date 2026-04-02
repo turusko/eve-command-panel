@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EVE Character Location</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #08111f;
+      --panel: rgba(14, 28, 46, 0.88);
+      --panel-strong: rgba(20, 38, 62, 0.95);
+      --text: #edf2f7;
+      --muted: #a9b8cc;
+      --accent: #ffb703;
+      --accent-dark: #f48c06;
+      --border: rgba(130, 171, 208, 0.24);
+      --grid: rgba(255, 255, 255, 0.06);
+      --good: #9ef0b8;
+      --bad: #ff9d9d;
+      --sec-blue: #7ec8ff;
+      --sec-green: #9ef0b8;
+      --sec-yellow: #ffd166;
+      --sec-light-red: #ff9d9d;
+      --sec-dark-red: #ff5d5d;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(255, 183, 3, 0.16), transparent 28%),
+        radial-gradient(circle at top right, rgba(90, 141, 238, 0.16), transparent 30%),
+        linear-gradient(180deg, #08111f, #050b14 65%);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: min(1600px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(10px);
+    }
+
+    h1 {
+      margin-top: 0;
+      margin-bottom: 6px;
+      font-size: clamp(2.2rem, 4vw, 3.5rem);
+      line-height: 1.05;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    p {
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 24px 0;
+    }
+
+    .button {
+      display: inline-block;
+      padding: 12px 18px;
+      border-radius: 999px;
+      text-decoration: none;
+      color: #111;
+      background: var(--accent);
+      font-weight: 700;
+    }
+
+    .button.pulling {
+      position: relative;
+      padding-left: 42px;
+    }
+
+    .button.pulling::before {
+      content: "";
+      position: absolute;
+      left: 16px;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      margin-top: -7px;
+      border: 2px solid rgba(17, 17, 17, 0.28);
+      border-top-color: #111;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .button.secondary {
+      color: var(--text);
+      background: transparent;
+      border: 1px solid var(--border);
+    }
+
+    .button.disabled {
+      pointer-events: none;
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .button:hover {
+      background: var(--accent-dark);
+    }
+
+    .button.secondary:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    @keyframes spin {
+      from {
+        transform: rotate(0deg);
+      }
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 20px;
+      background: var(--panel-strong);
+    }
+
+    .dashboard {
+      display: grid;
+      gap: 18px;
+    }
+
+    .character-layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .character-sidebar,
+    .character-main {
+      display: grid;
+      gap: 18px;
+    }
+
+    .character-sidebar {
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .character-tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    .character-tab {
+      display: inline-flex;
+      align-items: center;
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      text-decoration: none;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+      font-weight: 700;
+    }
+
+    .character-tab.active {
+      color: #111;
+      background: var(--accent);
+      border-color: transparent;
+    }
+
+    .hero {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 18px;
+    }
+
+    .wallet-panel {
+      min-width: 0;
+    }
+
+    .stat-label {
+      margin: 0 0 6px;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .stat-value {
+      margin: 0;
+      color: var(--text);
+      font-size: clamp(1.3rem, 3vw, 2rem);
+      font-weight: 700;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+
+    .security-high {
+      color: var(--sec-blue);
+    }
+
+    .security-mid {
+      color: var(--sec-green);
+    }
+
+    .security-borderline {
+      color: var(--sec-yellow);
+    }
+
+    .security-low {
+      color: var(--sec-light-red);
+    }
+
+    .security-null {
+      color: var(--sec-dark-red);
+    }
+
+    .journal-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .journal-table th,
+    .journal-table td {
+      padding: 12px 10px;
+      border-top: 1px solid var(--grid);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .journal-table th {
+      color: var(--muted);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-top: none;
+    }
+
+    .amount-positive {
+      color: var(--good);
+      font-weight: 700;
+    }
+
+    .amount-negative {
+      color: var(--bad);
+      font-weight: 700;
+    }
+
+    .section-title {
+      margin: 0 0 14px;
+      font-size: 1rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .pi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 18px;
+    }
+
+    .colony-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+    }
+
+    .colony-meta {
+      margin: 8px 0 0;
+    }
+
+    .colony-meta strong {
+      color: var(--text);
+    }
+
+    .warning {
+      color: var(--accent);
+    }
+
+    .cache-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      color: #ffd6a5;
+    }
+
+    @media (max-width: 700px) {
+      .card {
+        padding: 22px;
+      }
+
+      .hero {
+        align-items: start;
+        flex-direction: column;
+      }
+
+      .journal-table,
+      .journal-table tbody,
+      .journal-table tr,
+      .journal-table td {
+        display: block;
+        width: 100%;
+      }
+
+      .journal-table thead {
+        display: none;
+      }
+
+      .journal-table tr {
+        border-top: 1px solid var(--grid);
+        padding: 10px 0;
+      }
+
+      .journal-table td {
+        border: none;
+        padding: 6px 0;
+      }
+    }
+
+    @media (max-width: 1180px) {
+      .card {
+        width: min(1180px, 100%);
+      }
+
+      .character-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="hero">
+      <div>
+        <p class="eyebrow">Capsuleer Dashboard</p>
+        <h1>EVE Command Panel</h1>
+        <p>Track your location and recent wallet activity from one place.</p>
+      </div>
+
+      {% if logged_in %}
+        <div class="actions">
+          <a class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" href="{{ url_for('manual_pull') }}">{% if manual_pull_in_progress %}Pulling ESI{% else %}Pull ESI{% endif %}</a>
+          <a class="button" href="{{ url_for('login') }}">Add Character</a>
+          <a class="button secondary" href="{{ url_for('logout') }}">Disconnect All</a>
+        </div>
+      {% endif %}
+    </div>
+
+    {% if error %}
+      <div class="panel" style="margin-bottom: 18px;">
+        <strong>Error</strong>
+        <p>{{ error }}</p>
+      </div>
+    {% endif %}
+
+    {% if logged_in %}
+      <div class="dashboard">
+        {% if characters %}
+          <nav class="character-tabs" aria-label="Characters">
+            <a
+              class="character-tab {{ 'active' if active_character_id == 'overview' else '' }}"
+              href="{{ url_for('switch_overview') }}"
+            >
+              Overview
+            </a>
+            {% for character in characters %}
+              <a
+                class="character-tab {{ 'active' if character.character_id == active_character_id else '' }}"
+                href="{{ url_for('switch_character', character_id=character.character_id) }}"
+              >
+                {{ character.character_name }}
+              </a>
+            {% endfor %}
+          </nav>
+        {% endif %}
+
+        {% if overview_summary %}
+          {% if manual_pull_in_progress %}
+            <p class="cache-note">Pull in progress. Fresh dashboard data will appear when the refresh completes.</p>
+          {% elif not manual_pull_enabled and manual_pull_available_at %}
+            <p class="cache-note">Manual pull available again at {{ manual_pull_available_at | next_update_time }}.</p>
+          {% endif %}
+          <div class="character-layout">
+            <aside class="character-sidebar">
+              <section class="summary-grid">
+                <div class="panel">
+                  <p class="stat-label">Connected Characters</p>
+                  <p class="stat-value">{{ overview_summary.character_count }}</p>
+                </div>
+                <div class="panel wallet-panel">
+                  <p class="stat-label">Total Wallet</p>
+                  <p class="stat-value">{{ overview_summary.total_wallet_balance | isk }}</p>
+                </div>
+              </section>
+            </aside>
+
+            <div class="character-main">
+              <section class="panel">
+                <h2 class="section-title">Character PI Overview</h2>
+                {% if overview_summary.characters %}
+                  <table class="journal-table">
+                    <thead>
+                      <tr>
+                        <th>Character</th>
+                        <th>Next Expiry</th>
+                        <th>Time Remaining</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for character in overview_summary.characters %}
+                        <tr>
+                          <td>{{ character.character_name }}</td>
+                          <td>{{ character.next_expiry | eve_time if character.next_expiry else "No active extractors" }}</td>
+                          <td>{{ character.next_expiry | countdown if character.next_expiry else "-" }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                {% else %}
+                  <p>No characters connected yet.</p>
+                {% endif %}
+              </section>
+            </div>
+          </div>
+        {% elif location_summary %}
+          {% if manual_pull_in_progress %}
+            <p class="cache-note">Pull in progress. Fresh dashboard data will appear when the refresh completes.</p>
+          {% elif not manual_pull_enabled and manual_pull_available_at %}
+            <p class="cache-note">Manual pull available again at {{ manual_pull_available_at | next_update_time }}.</p>
+          {% endif %}
+          <div class="character-layout">
+            <aside class="character-sidebar">
+              <section class="summary-grid">
+                <div class="panel">
+                  <p class="stat-label">Character</p>
+                  <p class="stat-value">{{ location_summary.character_name }}</p>
+                </div>
+                <div class="panel">
+                  <p class="stat-label">Solar System</p>
+                  <p class="stat-value">{{ location_summary.solar_system.name if location_summary.solar_system else "Unknown" }}</p>
+                </div>
+                <div class="panel">
+                  <p class="stat-label">Security</p>
+                  {% set security_status = location_summary.solar_system.security_status if location_summary.solar_system else none %}
+                  <p class="stat-value {% if security_status is not none %}{% if security_status > 0.8 %}security-high{% elif security_status > 0.6 %}security-mid{% elif security_status == 0.5 %}security-borderline{% elif security_status > 0.0 %}security-low{% else %}security-null{% endif %}{% endif %}">{{ security_status if security_status is not none else "N/A" }}</p>
+                </div>
+                <div class="panel">
+                  <p class="stat-label">Current Ship</p>
+                  <p class="stat-value">{{ location_summary.ship_name if location_summary.ship_name else "Unknown" }}</p>
+                </div>
+                <div class="panel wallet-panel">
+                  <p class="stat-label">Wallet</p>
+                  <p class="stat-value">{{ location_summary.wallet_balance | isk }}</p>
+                </div>
+              </section>
+
+              <div class="panel">
+                <p class="cache-note">Last updated {{ location_summary._cached_at | cache_age if location_summary._cached_at else "live" }}. Next update {{ location_summary._next_update_at | next_update_time if location_summary._next_update_at else "on demand" }}.</p>
+              </div>
+            </aside>
+
+            <div class="character-main">
+              <section class="panel">
+                <h2 class="section-title">Last 5 Wallet Journal Entries</h2>
+                {% if location_summary.journal_entries %}
+                  <table class="journal-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th>Amount</th>
+                        <th>Balance</th>
+                        <th>Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for entry in location_summary.journal_entries %}
+                        <tr>
+                          <td>{{ entry.date | eve_time }}</td>
+                          <td>{{ entry.ref_type.replace("_", " ").title() }}</td>
+                          <td class="{{ 'amount-negative' if entry.amount < 0 else 'amount-positive' }}">
+                            {{ entry.amount | isk }}
+                          </td>
+                          <td>{{ entry.balance | isk }}</td>
+                          <td>{{ entry.description }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                {% else %}
+                  <p>No journal entries available yet.</p>
+                {% endif %}
+              </section>
+
+              <section class="panel">
+                <h2 class="section-title">Planetary Industry</h2>
+                {% if location_summary.pi %}
+                  <div class="pi-grid" style="margin-bottom: 18px;">
+                    <div class="panel">
+                      <p class="stat-label">Active Colonies</p>
+                      <p class="stat-value">{{ location_summary.pi.colony_count }}</p>
+                    </div>
+                    <div class="panel">
+                      <p class="stat-label">Active Extractors</p>
+                      <p class="stat-value">{{ location_summary.pi.active_extractors }}</p>
+                    </div>
+                    <div class="panel">
+                      <p class="stat-label">Need Attention (&lt;6h)</p>
+                      <p class="stat-value warning">{{ location_summary.pi.extractors_expiring_soon }}</p>
+                    </div>
+                    <div class="panel">
+                      <p class="stat-label">Next Expiry</p>
+                      <p class="stat-value">{{ location_summary.pi.next_expiry | countdown if location_summary.pi.next_expiry else "No active extractors" }}</p>
+                    </div>
+                  </div>
+
+                  <div class="colony-grid">
+                    {% for colony in location_summary.pi.colonies %}
+                      <div class="panel">
+                        <p class="stat-label">{{ colony.planet_type }} Colony</p>
+                        <p class="stat-value">{{ colony.system_name }}</p>
+                        <p class="colony-meta"><strong>Extractor heads:</strong> {{ colony.extractor_count }}</p>
+                        <p class="colony-meta"><strong>Pins:</strong> {{ colony.num_pins }}</p>
+                        <p class="colony-meta"><strong>Command center:</strong> {{ colony.upgrade_level }}</p>
+                        <p class="colony-meta"><strong>Last viewed:</strong> {{ colony.last_update | eve_time }}</p>
+                        <p class="colony-meta"><strong>Next expiry:</strong> {{ colony.next_expiry | countdown if colony.next_expiry else "No active extractors" }}</p>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <p>No PI colonies found for this character.</p>
+                {% endif %}
+              </section>
+            </div>
+          </div>
+        {% else %}
+          <div class="panel">
+            <p>No cached dashboard data yet. Please wait for next pull.</p>
+          </div>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="actions">
+        <a class="button" href="{{ url_for('login') }}">Login With EVE Online</a>
+      </div>
+
+      <div class="panel">
+        <p>Before logging in, create an app in the EVE developer portal and set:</p>
+        <p><code>EVE_CLIENT_ID</code>, <code>EVE_CLIENT_SECRET</code>, <code>EVE_REDIRECT_URI</code>, and <code>FLASK_SECRET_KEY</code>.</p>
+        <p>Required scopes: <code>esi-location.read_location.v1</code>, <code>esi-wallet.read_character_wallet.v1</code>, and <code>esi-planets.manage_planets.v1</code>.</p>
+        <p>Once one character is connected, you can use <strong>Add Character</strong> to create more tabs.</p>
+      </div>
+    {% endif %}
+  </main>
+</body>
+</html>
