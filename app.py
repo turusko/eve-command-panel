@@ -678,7 +678,9 @@ def fetch_wallet_journal(character_auth: dict, limit: int = 5) -> list[dict]:
         timeout=15,
     )
     response.raise_for_status()
-    return response.json()[:limit]
+    entries = response.json()
+    entries.sort(key=lambda entry: (entry.get("date", ""), entry.get("id", 0)), reverse=True)
+    return entries[:limit]
 
 
 def fetch_planetary_colonies(character_auth: dict) -> list[dict]:
