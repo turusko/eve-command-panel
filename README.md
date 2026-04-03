@@ -151,6 +151,7 @@ Open `http://127.0.0.1:5000`.
 You can also run the app with Docker.
 
 The important part is that the SQLite database should live on your machine, not only inside the container. This project supports that by using the `DATABASE_PATH` environment variable and a bind-mounted `data` folder.
+The app log file can live there too, using `LOG_PATH`.
 
 1. Create a local data folder
 
@@ -181,7 +182,9 @@ Open `http://127.0.0.1:5000`.
 ### Docker Notes
 
 - The database file will be stored on your machine in `./data/eve_dashboard.db`.
+- The app log file will be stored on your machine in `./data/eve_dashboard.log`.
 - Because the database is bind-mounted from the host, your characters and cache survive container restarts and container deletion.
+- Because the log file is also bind-mounted from the host, refresh errors and app events are still available after container restarts.
 - If you remove the `data` folder, you remove the saved database too.
 - If you are using Docker Desktop on Windows and `${PWD}` does not work in your shell, replace it with the full folder path.
 
@@ -189,6 +192,7 @@ Open `http://127.0.0.1:5000`.
 
 - This app uses the server-side authorization code flow with your client secret.
 - Authorized characters are stored locally in `eve_dashboard.db` by default, or in the path set by `DATABASE_PATH`.
+- The app writes a rotating log file next to the database by default, or in the path set by `LOG_PATH`.
 - Dashboard data is cached locally for 15 minutes to keep tab switching fast.
 - A background thread checks every 1 minute and refreshes characters whose cache is stale.
 - The `/location` route returns the dashboard JSON summary.

@@ -1,3 +1,5 @@
 .env
 eve_dashboard.db
+eve_dashboard.log
+eve_dashboard.log.*
 /__pycache__
