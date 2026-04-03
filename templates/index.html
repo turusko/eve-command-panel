@@ -195,6 +195,36 @@
       border-color: transparent;
     }
 
+    .pilot-card {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+    }
+
+    .portrait {
+      width: 88px;
+      height: 88px;
+      border-radius: 20px;
+      object-fit: cover;
+      display: block;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .portrait.small {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+    }
+
+    .mini-character {
+      display: grid;
+      grid-template-columns: 56px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+    }
+
     .hero {
       display: flex;
       align-items: end;
@@ -326,6 +356,13 @@
       font-size: 0.92rem;
     }
 
+    .version-note {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      text-align: right;
+    }
+
     code {
       font-family: Consolas, "Courier New", monospace;
       color: #ffd6a5;
@@ -430,6 +467,16 @@
       .stat-value {
         font-size: clamp(1.2rem, 6vw, 1.7rem);
       }
+
+      .pilot-card {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
+
+      .portrait {
+        width: 72px;
+        height: 72px;
+        border-radius: 16px;
+      }
     }
 
     @media (max-width: 1180px) {
@@ -526,7 +573,10 @@
                         <tr>
                           <td>
                             <span class="mobile-label">Character</span>
-                            {{ character.character_name }}
+                            <div class="mini-character">
+                              <img class="portrait small" src="{{ character.portrait_url }}" alt="{{ character.character_name }} portrait">
+                              <span>{{ character.character_name }}</span>
+                            </div>
                           </td>
                           <td>
                             <span class="mobile-label">Next Expiry</span>
@@ -556,8 +606,13 @@
             <aside class="character-sidebar">
               <section class="summary-grid">
                 <div class="panel">
-                  <p class="stat-label">Character</p>
-                  <p class="stat-value">{{ location_summary.character_name }}</p>
+                  <div class="pilot-card">
+                    <img class="portrait" src="{{ location_summary.portrait_url if location_summary.portrait_url else 'https://images.evetech.net/characters/' ~ location_summary.character_id ~ '/portrait?size=256' }}" alt="{{ location_summary.character_name }} portrait">
+                    <div>
+                      <p class="stat-label">Character</p>
+                      <p class="stat-value">{{ location_summary.character_name }}</p>
+                    </div>
+                  </div>
                 </div>
                 <div class="panel">
                   <p class="stat-label">Solar System</p>
@@ -688,6 +743,8 @@
         <p>Once one character is connected, you can use <strong>Add Character</strong> to create more tabs.</p>
       </div>
     {% endif %}
+
+    <p class="version-note">Version {{ app_version }}</p>
   </main>
 </body>
 </html>
