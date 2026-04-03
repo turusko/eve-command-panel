@@ -118,7 +118,8 @@
       border: 1px solid rgba(255, 93, 93, 0.32);
     }
 
-    .button.disabled {
+    .button.disabled,
+    .button:disabled {
       pointer-events: none;
       opacity: 0.45;
       cursor: not-allowed;
@@ -670,7 +671,7 @@
         <div class="actions">
           <form class="inline-form" method="post" action="{{ url_for('manual_pull') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" {% if manual_pull_in_progress or not manual_pull_enabled %}disabled{% endif %}>{% if manual_pull_in_progress %}Pulling ESI{% else %}Pull ESI{% endif %}</button>
+            <button type="submit" class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" {% if manual_pull_in_progress or not manual_pull_enabled %}disabled{% endif %}>{% if manual_pull_in_progress %}Pulling ESI{% else %}{{ manual_pull_scope_label }}{% endif %}</button>
           </form>
           <a class="button" href="{{ url_for('login') }}">Add Character</a>
           <form class="inline-form" method="post" action="{{ url_for('logout') }}">
@@ -841,10 +842,15 @@
 
               <div class="panel">
                 <p class="stat-label">Character Link</p>
+                {% set delink_locked = primary_character_id == location_summary.character_id and characters|length > 1 %}
                 <form class="settings-form" method="post" action="{{ url_for('remove_character_route', character_id=location_summary.character_id) }}">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button type="submit" class="button danger">De-Link This Character</button>
-                  <p class="cache-note">Removes this pilot from the current dashboard only. Other linked characters stay connected.</p>
+                  <button type="submit" class="button danger{% if delink_locked %} disabled{% endif %}" {% if delink_locked %}disabled aria-disabled="true"{% endif %}>De-Link This Character</button>
+                  {% if delink_locked %}
+                    <p class="cache-note">This is the main login character. De-link the other linked characters first.</p>
+                  {% else %}
+                    <p class="cache-note">Removes this pilot from the current dashboard only. Other linked characters stay connected.</p>
+                  {% endif %}
                 </form>
               </div>
             </aside>
@@ -1018,11 +1024,40 @@
 
     <p class="version-note">Version {{ app_version }}</p>
   </main>
-  {% if manual_pull_in_progress %}
+  {% if logged_in %}
     <script>
-      window.setTimeout(function () {
-        window.location.reload();
-      }, 5000);
+      (function () {
+        const refreshIntervalMs = {{ 5000 if manual_pull_in_progress else 60000 }};
+        let refreshTimer = null;
+
+        function scheduleRefresh() {
+          if (document.hidden || refreshTimer !== null) {
+            return;
+          }
+          refreshTimer = window.setTimeout(function () {
+            window.location.reload();
+          }, refreshIntervalMs);
+        }
+
+        function clearRefresh() {
+          if (refreshTimer === null) {
+            return;
+          }
+          window.clearTimeout(refreshTimer);
+          refreshTimer = null;
+        }
+
+        document.addEventListener("visibilitychange", function () {
+          if (document.hidden) {
+            clearRefresh();
+            return;
+          }
+          scheduleRefresh();
+        });
+
+        window.addEventListener("beforeunload", clearRefresh);
+        scheduleRefresh();
+      })();
     </script>
   {% endif %}
 </body>

@@ -28,15 +28,19 @@ EVE_IMAGE_BASE_URL = "https://images.evetech.net"
 ESI_COMPATIBILITY_DATE = "2026-04-02"
 APP_VERSION = "0.2.0"
 CACHE_TTL_SECONDS = 15 * 60
-BACKGROUND_REFRESH_INTERVAL_SECONDS = 1 * 60
+BACKGROUND_REFRESH_INTERVAL_SECONDS = 10
 BACKGROUND_REFRESH_LEASE_SECONDS = 3 * BACKGROUND_REFRESH_INTERVAL_SECONDS
 MANUAL_PULL_COOLDOWN_SECONDS = 60
+BACKGROUND_REFRESH_REQUEST_WAKE_WINDOW_SECONDS = 15
+BACKGROUND_REFRESH_REQUEST_POLL_SECONDS = 5
 SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "30"))
 CSRF_SESSION_KEY = "csrf_token"
 REFRESHER_LEASE_KEY = "background_refresher_lease"
 PI_ATTENTION_WINDOW_MIN_HOURS = 1
 PI_ATTENTION_WINDOW_MAX_HOURS = 24
 PI_ATTENTION_WINDOW_STATE_KEY = "pi_attention_window_hours"
+PRIMARY_CHARACTER_STATE_KEY = "primary_character_id"
+MANUAL_PULL_PENDING_CHARACTERS_STATE_KEY = "manual_pull_pending_character_ids"
 EVE_SCOPES = [
     "esi-location.read_location.v1",
     "esi-location.read_ship_type.v1",
@@ -61,6 +65,7 @@ LOG_PATH = Path(os.getenv("LOG_PATH", DATABASE_PATH.with_name("eve_dashboard.log
 REFRESHER_LOCK = threading.Lock()
 REFRESHER_STARTED = False
 REFRESHER_OWNER_ID = f"{os.getpid()}-{secrets.token_hex(8)}"
+REFRESHER_WAKE_EVENT = threading.Event()
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -554,6 +559,13 @@ def request_dashboard_refresh(character_id: int) -> None:
         (instance_id, character_id, now),
     )
     db.commit()
+    logger.info(
+        "Queued dashboard refresh for instance %s character %s at %s",
+        instance_id,
+        character_id,
+        now,
+    )
+    REFRESHER_WAKE_EVENT.set()
 
 
 def clear_dashboard_cache(character_id: int | None = None) -> None:
@@ -586,7 +598,11 @@ def remove_character(character_id: int) -> bool:
 
 
 def get_app_state(key: str) -> str | None:
-    instance_id = get_instance_id()
+    return get_app_state_for_instance(key)
+
+
+def get_app_state_for_instance(key: str, instance_id: str | None = None) -> str | None:
+    instance_id = instance_id or get_instance_id()
     if not instance_id:
         return None
     row = get_db().execute(
@@ -597,7 +613,11 @@ def get_app_state(key: str) -> str | None:
 
 
 def set_app_state(key: str, value: str | int | None) -> None:
-    instance_id = get_instance_id()
+    set_app_state_for_instance(key, value)
+
+
+def set_app_state_for_instance(key: str, value: str | int | None, instance_id: str | None = None) -> None:
+    instance_id = instance_id or get_instance_id()
     if not instance_id:
         return
     db = get_db()
@@ -613,6 +633,98 @@ def set_app_state(key: str, value: str | int | None) -> None:
             (instance_id, key, str(value)),
     )
     db.commit()
+
+
+def get_primary_character_id(instance_id: str | None = None) -> int | None:
+    value = get_app_state_for_instance(PRIMARY_CHARACTER_STATE_KEY, instance_id)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_primary_character_id(character_id: int | None, instance_id: str | None = None) -> None:
+    set_app_state_for_instance(PRIMARY_CHARACTER_STATE_KEY, character_id, instance_id)
+
+
+def ensure_primary_character_id(instance_id: str | None = None) -> int | None:
+    instance_id = instance_id or get_instance_id()
+    if not instance_id:
+        return None
+
+    primary_character_id = get_primary_character_id(instance_id)
+    if primary_character_id is not None:
+        exists = get_db().execute(
+            """
+            SELECT 1
+            FROM user_characters
+            WHERE instance_id = ? AND character_id = ?
+            """,
+            (instance_id, primary_character_id),
+        ).fetchone()
+        if exists:
+            return primary_character_id
+
+    row = get_db().execute(
+        """
+        SELECT character_id
+        FROM user_characters
+        WHERE instance_id = ?
+        ORDER BY character_name COLLATE NOCASE, character_id
+        LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if not row:
+        set_primary_character_id(None, instance_id)
+        return None
+
+    primary_character_id = int(row["character_id"])
+    set_primary_character_id(primary_character_id, instance_id)
+    return primary_character_id
+
+
+def get_manual_pull_pending_character_ids(instance_id: str | None = None) -> list[int]:
+    value = get_app_state_for_instance(MANUAL_PULL_PENDING_CHARACTERS_STATE_KEY, instance_id)
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    pending_character_ids: list[int] = []
+    for character_id in parsed:
+        try:
+            pending_character_ids.append(int(character_id))
+        except (TypeError, ValueError):
+            continue
+    return pending_character_ids
+
+
+def set_manual_pull_pending_character_ids(character_ids: list[int], instance_id: str | None = None) -> None:
+    unique_character_ids = list(dict.fromkeys(int(character_id) for character_id in character_ids))
+    if unique_character_ids:
+        set_app_state_for_instance(
+            MANUAL_PULL_PENDING_CHARACTERS_STATE_KEY,
+            json.dumps(unique_character_ids),
+            instance_id,
+        )
+    else:
+        set_app_state_for_instance(MANUAL_PULL_PENDING_CHARACTERS_STATE_KEY, None, instance_id)
+
+
+def mark_manual_pull_character_complete(instance_id: str, character_id: int) -> None:
+    pending_character_ids = [
+        pending_character_id
+        for pending_character_id in get_manual_pull_pending_character_ids(instance_id)
+        if pending_character_id != character_id
+    ]
+    set_manual_pull_pending_character_ids(pending_character_ids, instance_id)
 
 
 def clamp_pi_attention_window_hours(value: int) -> int:
@@ -812,6 +924,7 @@ def get_saved_characters() -> list[dict]:
     instance_id = get_instance_id()
     if not instance_id:
         return []
+    primary_character_id = ensure_primary_character_id(instance_id)
     attention_window_hours = get_pi_attention_window_hours(instance_id)
     rows = get_db().execute(
         """
@@ -832,6 +945,7 @@ def get_saved_characters() -> list[dict]:
             {
                 "character_id": row["character_id"],
                 "character_name": row["character_name"],
+                "is_primary": row["character_id"] == primary_character_id,
                 "tab_badges": build_character_tab_badges(payload, row["fetched_at"], attention_window_hours),
             }
         )
@@ -1005,8 +1119,13 @@ def login_required(view_func):
 @app.route("/")
 def index():
     saved_characters = get_saved_characters()
+    primary_character_id = next(
+        (character["character_id"] for character in saved_characters if character.get("is_primary")),
+        None,
+    )
     active_character_id = session.get("active_character_id", "overview")
     active_character = None if active_character_id == "overview" else get_active_character_auth()
+    manual_pull_scope_label = "Pull All ESI" if active_character_id == "overview" else "Pull This Character"
     location_summary = None
     overview_summary = None
     error = request.args.get("error")
@@ -1031,6 +1150,8 @@ def index():
         logged_in=bool(saved_characters),
         characters=saved_characters,
         active_character_id=active_character_id,
+        primary_character_id=primary_character_id,
+        manual_pull_scope_label=manual_pull_scope_label,
         app_version=APP_VERSION,
         pi_attention_window_hours=pi_attention_window_hours,
         pi_attention_window_options=range(PI_ATTENTION_WINDOW_MIN_HOURS, PI_ATTENTION_WINDOW_MAX_HOURS + 1),
@@ -1107,10 +1228,27 @@ def callback():
         target_instance_id = existing_instance_id or get_instance_id(create=True)
         session["instance_id"] = target_instance_id
 
+    already_linked_to_target = character_exists_for_instance(target_instance_id, character_id)
     save_character_auth(character_id, character["name"], token_data, instance_id=target_instance_id)
+    if already_linked_to_target:
+        logger.info(
+            "Character %s (%s) signed in to existing dashboard instance %s via SSO",
+            character["name"],
+            character_id,
+            target_instance_id,
+        )
+    else:
+        logger.info(
+            "Linked character %s (%s) to dashboard instance %s via SSO",
+            character["name"],
+            character_id,
+            target_instance_id,
+        )
+    ensure_primary_character_id(target_instance_id)
     if session.get("active_character_id") in (None, "overview"):
         session["active_character_id"] = "overview"
-    request_dashboard_refresh(character_id)
+    if not already_linked_to_target:
+        request_dashboard_refresh(character_id)
     session.pop("oauth_state", None)
     return redirect(url_for("index"))
 
@@ -1276,7 +1414,28 @@ def get_first_present(mapping: dict, *keys):
     return None
 
 
+def log_refresh_step(character_id: int, step_name: str, action, *args, **kwargs):
+    started_at = time.perf_counter()
+    logger.info("ESI refresh step started for %s: %s", character_id, step_name)
+    try:
+        result = action(*args, **kwargs)
+    except Exception:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.exception(
+            "ESI refresh step failed for %s: %s after %sms",
+            character_id,
+            step_name,
+            elapsed_ms,
+        )
+        raise
+
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info("ESI refresh step completed for %s: %s in %sms", character_id, step_name, elapsed_ms)
+    return result
+
+
 def build_pi_summary(character_auth: dict, colonies: list[dict], attention_window_hours: int) -> dict:
+    character_id = character_auth["character_id"]
     system_cache: dict[int, dict] = {}
     colony_cards = []
     extractors_expiring_soon = 0
@@ -1284,13 +1443,28 @@ def build_pi_summary(character_auth: dict, colonies: list[dict], attention_windo
     active_extractors = 0
     now = datetime.now(timezone.utc)
 
-    for colony in colonies:
+    for index, colony in enumerate(colonies, start=1):
+        colony_started_at = time.perf_counter()
+        logger.info(
+            "ESI PI colony %s/%s started for %s: planet_id=%s system_id=%s",
+            index,
+            len(colonies),
+            character_id,
+            colony["planet_id"],
+            colony["solar_system_id"],
+        )
         system_id = colony["solar_system_id"]
         if system_id not in system_cache:
-            system_cache[system_id] = fetch_solar_system(system_id)
+            system_cache[system_id] = log_refresh_step(character_id, f"solar_system:{system_id}", fetch_solar_system, system_id)
         system = system_cache[system_id]
 
-        layout = fetch_planet_layout(character_auth, colony["planet_id"])
+        layout = log_refresh_step(
+            character_id,
+            f"planet_layout:{colony['planet_id']}",
+            fetch_planet_layout,
+            character_auth,
+            colony["planet_id"],
+        )
         pins = layout.get("pins", [])
 
         extractor_pins = []
@@ -1353,6 +1527,16 @@ def build_pi_summary(character_auth: dict, colonies: list[dict], attention_windo
                 "next_expiry": soonest_colony_expiry.isoformat().replace("+00:00", "Z") if soonest_colony_expiry else None,
             }
         )
+        colony_elapsed_ms = int((time.perf_counter() - colony_started_at) * 1000)
+        logger.info(
+            "ESI PI colony %s/%s completed for %s: planet_id=%s extractors=%s in %sms",
+            index,
+            len(colonies),
+            character_id,
+            colony["planet_id"],
+            len(extractor_pins),
+            colony_elapsed_ms,
+        )
 
     colony_cards.sort(key=lambda colony: colony["next_expiry"] or "9999")
 
@@ -1367,17 +1551,25 @@ def build_pi_summary(character_auth: dict, colonies: list[dict], attention_windo
 
 def build_location_summary(character_auth: dict, attention_window_hours: int) -> dict:
     character_id = character_auth["character_id"]
-    location = fetch_character_location(character_auth)
-    character = fetch_character_profile(character_id)
-    ship = fetch_current_ship(character_auth)
-    wallet_balance = fetch_wallet_balance(character_auth)
-    journal_entries, journal_metadata = fetch_wallet_journal(character_auth, limit=5)
-    colonies = fetch_planetary_colonies(character_auth)
+    summary_started_at = time.perf_counter()
+    logger.info("ESI refresh started for %s", character_id)
+    location = log_refresh_step(character_id, "location", fetch_character_location, character_auth)
+    character = log_refresh_step(character_id, "character_profile", fetch_character_profile, character_id)
+    ship = log_refresh_step(character_id, "current_ship", fetch_current_ship, character_auth)
+    wallet_balance = log_refresh_step(character_id, "wallet_balance", fetch_wallet_balance, character_auth)
+    journal_entries, journal_metadata = log_refresh_step(
+        character_id,
+        "wallet_journal",
+        fetch_wallet_journal,
+        character_auth,
+        5,
+    )
+    colonies = log_refresh_step(character_id, "planetary_colonies", fetch_planetary_colonies, character_auth)
 
     ship_name = "Unknown"
     ship_type_id = ship.get("ship_type_id")
     if ship_type_id:
-        names = fetch_universe_names([ship_type_id])
+        names = log_refresh_step(character_id, f"ship_name:{ship_type_id}", fetch_universe_names, [ship_type_id])
         if names:
             ship_name = names[0]["name"]
 
@@ -1390,18 +1582,27 @@ def build_location_summary(character_auth: dict, attention_window_hours: int) ->
         "wallet_balance": wallet_balance,
         "journal_entries": journal_entries,
         "journal_status": build_wallet_journal_status(journal_entries, journal_metadata),
-        "pi": build_pi_summary(character_auth, colonies, attention_window_hours),
+        "pi": log_refresh_step(
+            character_id,
+            f"pi_summary:{len(colonies)}_colonies",
+            build_pi_summary,
+            character_auth,
+            colonies,
+            attention_window_hours,
+        ),
     }
 
     solar_system_id = location.get("solar_system_id")
     if solar_system_id:
-        solar_system = fetch_solar_system(solar_system_id)
+        solar_system = log_refresh_step(character_id, f"current_solar_system:{solar_system_id}", fetch_solar_system, solar_system_id)
         security_status = solar_system.get("security_status")
         summary["solar_system"] = {
             "name": solar_system["name"],
             "security_status": math.floor(security_status * 10) / 10 if security_status is not None else None,
         }
 
+    summary_elapsed_ms = int((time.perf_counter() - summary_started_at) * 1000)
+    logger.info("ESI refresh completed for %s in %sms", character_id, summary_elapsed_ms)
     return summary
 
 
@@ -1415,6 +1616,18 @@ def get_character_auth_for_instance(instance_id: str, character_id: int):
         (instance_id, character_id),
     ).fetchone()
     return dict(row) if row else None
+
+
+def character_exists_for_instance(instance_id: str, character_id: int) -> bool:
+    row = get_db().execute(
+        """
+        SELECT 1
+        FROM user_characters
+        WHERE instance_id = ? AND character_id = ?
+        """,
+        (instance_id, character_id),
+    ).fetchone()
+    return row is not None
 
 
 def update_character_tokens_for_instance(instance_id: str, character_id: int, token_data: dict) -> None:
@@ -1463,31 +1676,77 @@ def refresh_access_token_if_needed_for_worker(instance_id: str, character_auth: 
 
 
 def save_cached_dashboard_for_instance(instance_id: str, character_id: int, payload: dict) -> None:
-    replace_wallet_journal_entries(instance_id, character_id, payload.get("journal_entries", []))
+    if not character_exists_for_instance(instance_id, character_id):
+        logger.info(
+            "Skipping cache save for instance %s character %s because it is no longer linked",
+            instance_id,
+            character_id,
+        )
+        return
+
     db = get_db()
-    db.execute(
-        """
-        INSERT INTO user_dashboard_cache (instance_id, character_id, payload_json, fetched_at, refresh_requested_at)
-        VALUES (?, ?, ?, ?, NULL)
-        ON CONFLICT(instance_id, character_id) DO UPDATE SET
-            payload_json = excluded.payload_json,
-            fetched_at = excluded.fetched_at,
-            refresh_requested_at = NULL
-        """,
-        (instance_id, character_id, json.dumps(payload), int(time.time())),
-    )
-    db.commit()
+    try:
+        replace_wallet_journal_entries(instance_id, character_id, payload.get("journal_entries", []))
+        if not character_exists_for_instance(instance_id, character_id):
+            db.rollback()
+            logger.info(
+                "Skipping cache save for instance %s character %s because it was de-linked during refresh",
+                instance_id,
+                character_id,
+            )
+            return
+        db.execute(
+            """
+            INSERT INTO user_dashboard_cache (instance_id, character_id, payload_json, fetched_at, refresh_requested_at)
+            VALUES (?, ?, ?, ?, NULL)
+            ON CONFLICT(instance_id, character_id) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                fetched_at = excluded.fetched_at,
+                refresh_requested_at = NULL
+            """,
+            (instance_id, character_id, json.dumps(payload), int(time.time())),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        logger.info(
+            "Skipping cache save for instance %s character %s because it is no longer linked",
+            instance_id,
+            character_id,
+        )
 
 
 def refresh_dashboard_cache_for_character(instance_id: str, character_id: int) -> None:
+    refresh_started_at = time.perf_counter()
+    logger.info("Background refresh started for instance %s character %s", instance_id, character_id)
     character_auth = get_character_auth_for_instance(instance_id, character_id)
     if not character_auth:
+        logger.info(
+            "Background refresh skipped for instance %s character %s because auth was not found",
+            instance_id,
+            character_id,
+        )
+        mark_manual_pull_character_complete(instance_id, character_id)
         return
     character_auth = refresh_access_token_if_needed_for_worker(instance_id, character_auth)
     if not character_auth:
+        logger.info(
+            "Background refresh skipped for instance %s character %s because auth refresh failed",
+            instance_id,
+            character_id,
+        )
+        mark_manual_pull_character_complete(instance_id, character_id)
         return
     summary = build_location_summary(character_auth, get_pi_attention_window_hours(instance_id))
     save_cached_dashboard_for_instance(instance_id, character_id, summary)
+    mark_manual_pull_character_complete(instance_id, character_id)
+    refresh_elapsed_ms = int((time.perf_counter() - refresh_started_at) * 1000)
+    logger.info(
+        "Background refresh completed for instance %s character %s in %sms",
+        instance_id,
+        character_id,
+        refresh_elapsed_ms,
+    )
 
 
 def replace_wallet_journal_entries(
@@ -1562,8 +1821,22 @@ def get_characters_needing_refresh() -> list[tuple[str, int]]:
     return [(row["instance_id"], row["character_id"]) for row in rows]
 
 
+def has_recent_refresh_requests(window_seconds: int = BACKGROUND_REFRESH_REQUEST_WAKE_WINDOW_SECONDS) -> bool:
+    now = int(time.time())
+    row = get_db().execute(
+        """
+        SELECT 1
+        FROM user_dashboard_cache
+        WHERE refresh_requested_at IS NOT NULL
+          AND refresh_requested_at >= ?
+        LIMIT 1
+        """,
+        (now - window_seconds,),
+    ).fetchone()
+    return row is not None
+
+
 def finalize_manual_pull_if_complete() -> None:
-    pending_by_instance = {instance_id for instance_id, _ in get_characters_needing_refresh()}
     rows = get_db().execute(
         """
         SELECT instance_id
@@ -1573,31 +1846,31 @@ def finalize_manual_pull_if_complete() -> None:
     ).fetchall()
     for row in rows:
         instance_id = row["instance_id"]
-        if instance_id in pending_by_instance:
-            continue
-        set_app_state_for_instance(instance_id, "manual_pull_in_progress", "0")
-        set_app_state_for_instance(instance_id, "last_manual_pull_completed_at", int(time.time()))
-
-
-def set_app_state_for_instance(instance_id: str, key: str, value: str | int | None) -> None:
-    db = get_db()
-    if value is None:
-        db.execute("DELETE FROM user_app_state WHERE instance_id = ? AND key = ?", (instance_id, key))
-    else:
-        db.execute(
+        linked_character_rows = get_db().execute(
             """
-            INSERT INTO user_app_state (instance_id, key, value)
-            VALUES (?, ?, ?)
-            ON CONFLICT(instance_id, key) DO UPDATE SET value = excluded.value
+            SELECT character_id
+            FROM user_characters
+            WHERE instance_id = ?
             """,
-            (instance_id, key, str(value)),
-        )
-    db.commit()
+            (instance_id,),
+        ).fetchall()
+        linked_character_ids = {int(linked_row["character_id"]) for linked_row in linked_character_rows}
+        pending_character_ids = [
+            character_id
+            for character_id in get_manual_pull_pending_character_ids(instance_id)
+            if character_id in linked_character_ids
+        ]
+        set_manual_pull_pending_character_ids(pending_character_ids, instance_id)
+        if pending_character_ids:
+            continue
+        set_app_state_for_instance("manual_pull_in_progress", "0", instance_id)
+        set_app_state_for_instance("last_manual_pull_completed_at", int(time.time()), instance_id)
 
 
 def background_refresh_loop():
     lease_held = False
     while True:
+        should_break_wait = False
         try:
             with app.app_context():
                 init_db()
@@ -1613,6 +1886,7 @@ def background_refresh_loop():
                         try:
                             refresh_dashboard_cache_for_character(instance_id, character_id)
                         except Exception:
+                            mark_manual_pull_character_complete(instance_id, character_id)
                             logger.exception(
                                 "Background refresh failed for instance %s character %s",
                                 instance_id,
@@ -1620,9 +1894,24 @@ def background_refresh_loop():
                             )
                             continue
                     finalize_manual_pull_if_complete()
+                elapsed_wait_seconds = 0
+                while elapsed_wait_seconds < BACKGROUND_REFRESH_INTERVAL_SECONDS:
+                    wait_seconds = min(
+                        BACKGROUND_REFRESH_REQUEST_POLL_SECONDS,
+                        BACKGROUND_REFRESH_INTERVAL_SECONDS - elapsed_wait_seconds,
+                    )
+                    if has_recent_refresh_requests():
+                        wait_seconds = min(wait_seconds, BACKGROUND_REFRESH_REQUEST_POLL_SECONDS)
+                    was_woken = REFRESHER_WAKE_EVENT.wait(wait_seconds)
+                    REFRESHER_WAKE_EVENT.clear()
+                    if was_woken or has_recent_refresh_requests():
+                        should_break_wait = True
+                        break
+                    elapsed_wait_seconds += wait_seconds
         except Exception:
             logger.exception("Background refresh loop failed")
-        time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
+        if should_break_wait:
+            continue
 
 
 def start_background_refresher() -> None:
@@ -1636,6 +1925,7 @@ def start_background_refresher() -> None:
         thread = threading.Thread(target=background_refresh_loop, daemon=True)
         thread.start()
         REFRESHER_STARTED = True
+        REFRESHER_WAKE_EVENT.set()
         logger.info("Background refresher started with %s second interval", BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
@@ -1669,15 +1959,31 @@ def remove_character_route(character_id: int):
     if not get_character_auth(character_id):
         return redirect(url_for("index", error="Character not found."))
 
+    linked_characters = get_saved_characters()
+    primary_character_id = ensure_primary_character_id()
+    if primary_character_id == character_id and len(linked_characters) > 1:
+        return redirect(
+            url_for(
+                "index",
+                error="De-link the other linked characters first before removing the main login character.",
+            )
+        )
+
     removed = remove_character(character_id)
     if not removed:
         return redirect(url_for("index", error="Could not remove that character from this dashboard."))
 
+    instance_id = get_instance_id()
+    if instance_id:
+        mark_manual_pull_character_complete(instance_id, character_id)
+
     remaining_characters = get_saved_characters()
     if remaining_characters:
+        ensure_primary_character_id()
         if session.get("active_character_id") == character_id:
             session["active_character_id"] = "overview"
     else:
+        set_primary_character_id(None)
         session["active_character_id"] = "overview"
 
     logger.info("Removed character %s from current dashboard", character_id)
@@ -1699,12 +2005,28 @@ def manual_pull():
     if not can_manual_pull():
         return redirect(url_for("index", error="Manual pull is on cooldown. Please wait a moment."))
 
-    for character in saved_characters:
+    active_character_id = session.get("active_character_id", "overview")
+    if active_character_id == "overview":
+        characters_to_refresh = saved_characters
+    else:
+        active_character = get_character_auth(active_character_id)
+        if not active_character:
+            return redirect(url_for("index", error="Active character not found for manual pull."))
+        characters_to_refresh = [active_character]
+
+    for character in characters_to_refresh:
         request_dashboard_refresh(character["character_id"])
 
+    set_manual_pull_pending_character_ids(
+        [character["character_id"] for character in characters_to_refresh]
+    )
     set_app_state("manual_pull_in_progress", "1")
     set_app_state("last_manual_pull_completed_at", None)
-    logger.info("Manual ESI pull requested for %s linked characters", len(saved_characters))
+    logger.info(
+        "Manual ESI pull requested for %s linked characters on view %s",
+        len(characters_to_refresh),
+        active_character_id,
+    )
     return redirect(url_for("index"))
 
 
