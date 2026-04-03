@@ -1,4 +1,5 @@
 import base64
+import hmac
 import json
 import logging
 import math
@@ -29,7 +30,11 @@ APP_VERSION = "0.2.0"
 PI_ATTENTION_WINDOW_HOURS = 6
 CACHE_TTL_SECONDS = 15 * 60
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 1 * 60
+BACKGROUND_REFRESH_LEASE_SECONDS = 3 * BACKGROUND_REFRESH_INTERVAL_SECONDS
 MANUAL_PULL_COOLDOWN_SECONDS = 60
+SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "30"))
+CSRF_SESSION_KEY = "csrf_token"
+REFRESHER_LEASE_KEY = "background_refresher_lease"
 EVE_SCOPES = [
     "esi-location.read_location.v1",
     "esi-location.read_ship_type.v1",
@@ -40,11 +45,20 @@ EVE_SCOPES = [
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=SESSION_LIFETIME_DAYS)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).with_name("eve_dashboard.db")))
 LOG_PATH = Path(os.getenv("LOG_PATH", DATABASE_PATH.with_name("eve_dashboard.log")))
 REFRESHER_LOCK = threading.Lock()
 REFRESHER_STARTED = False
+REFRESHER_OWNER_ID = f"{os.getpid()}-{secrets.token_hex(8)}"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -52,6 +66,33 @@ def env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_csrf_token() -> str:
+    token = session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[CSRF_SESSION_KEY] = token
+    return token
+
+
+@app.context_processor
+def inject_template_helpers() -> dict:
+    return {"csrf_token": get_csrf_token}
+
+
+@app.before_request
+def protect_post_routes():
+    if request.method != "POST":
+        return None
+
+    expected_token = session.get(CSRF_SESSION_KEY)
+    submitted_token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+    if expected_token and submitted_token and hmac.compare_digest(expected_token, submitted_token):
+        return None
+
+    logger.warning("Rejected POST request for %s due to missing or invalid CSRF token", request.path)
+    return redirect(url_for("index", error="Your session security token was invalid. Please try again."))
 
 
 def configure_logging() -> logging.Logger:
@@ -523,8 +564,44 @@ def set_app_state(key: str, value: str | int | None) -> None:
             ON CONFLICT(instance_id, key) DO UPDATE SET value = excluded.value
             """,
             (instance_id, key, str(value)),
-        )
+    )
     db.commit()
+
+
+def try_acquire_refresh_lease() -> bool:
+    db = get_db()
+    now = int(time.time())
+    lease_payload = json.dumps(
+        {
+            "owner": REFRESHER_OWNER_ID,
+            "expires_at": now + BACKGROUND_REFRESH_LEASE_SECONDS,
+        }
+    )
+
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (REFRESHER_LEASE_KEY,)).fetchone()
+        lease = json.loads(row["value"]) if row and row["value"] else {}
+        lease_owner = lease.get("owner")
+        lease_expires_at = int(lease.get("expires_at") or 0)
+
+        if lease_owner and lease_owner != REFRESHER_OWNER_ID and lease_expires_at > now:
+            db.rollback()
+            return False
+
+        db.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (REFRESHER_LEASE_KEY, lease_payload),
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
 
 
 def get_last_manual_pull_at() -> int | None:
@@ -733,10 +810,6 @@ def parse_character_id(access_token: str) -> int:
     return int(subject.rsplit(":", 1)[-1])
 
 
-def save_token(token_data: dict) -> None:
-    session["pending_token_data"] = token_data
-
-
 def refresh_access_token_if_needed(character_auth: dict | None) -> dict | None:
     if not character_auth:
         return
@@ -863,7 +936,6 @@ def callback():
     )
     response.raise_for_status()
     token_data = response.json()
-    save_token(token_data)
     character_id = parse_character_id(token_data["access_token"])
     character = fetch_character_profile(character_id)
     current_instance_id = get_instance_id()
@@ -873,7 +945,6 @@ def callback():
     if current_has_characters:
         if existing_instance_id and existing_instance_id != current_instance_id:
             session.pop("oauth_state", None)
-            session.pop("pending_token_data", None)
             return redirect(
                 url_for("index", error="That character is already linked to another dashboard.")
             )
@@ -886,7 +957,6 @@ def callback():
     if session.get("active_character_id") in (None, "overview"):
         session["active_character_id"] = "overview"
     request_dashboard_refresh(character_id)
-    session.pop("pending_token_data", None)
     session.pop("oauth_state", None)
     return redirect(url_for("index"))
 
@@ -1372,10 +1442,20 @@ def set_app_state_for_instance(instance_id: str, key: str, value: str | int | No
 
 
 def background_refresh_loop():
+    lease_held = False
     while True:
+        should_sleep = True
         try:
             with app.app_context():
                 init_db()
+                if not try_acquire_refresh_lease():
+                    if lease_held:
+                        logger.info("Background refresher lease transferred away from %s", REFRESHER_OWNER_ID)
+                        lease_held = False
+                    continue
+                if not lease_held:
+                    logger.info("Background refresher lease acquired by %s", REFRESHER_OWNER_ID)
+                    lease_held = True
                 for instance_id, character_id in get_characters_needing_refresh():
                     try:
                         refresh_dashboard_cache_for_character(instance_id, character_id)
@@ -1389,11 +1469,15 @@ def background_refresh_loop():
                 finalize_manual_pull_if_complete()
         except Exception:
             logger.exception("Background refresh loop failed")
-        time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
+        if should_sleep:
+            time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
 def start_background_refresher() -> None:
     global REFRESHER_STARTED
+    if not env_flag("ENABLE_BACKGROUND_REFRESHER", True):
+        logger.info("Background refresher disabled by configuration")
+        return
     with REFRESHER_LOCK:
         if REFRESHER_STARTED:
             return
@@ -1420,7 +1504,7 @@ def location():
     return {"message": "No cached dashboard data yet. Please wait for next pull."}
 
 
-@app.route("/characters/<int:character_id>/switch")
+@app.route("/characters/<int:character_id>/switch", methods=["POST"])
 def switch_character(character_id: int):
     if not get_character_auth(character_id):
         return redirect(url_for("index", error="Character not found."))
@@ -1428,13 +1512,13 @@ def switch_character(character_id: int):
     return redirect(url_for("index"))
 
 
-@app.route("/overview")
+@app.route("/overview", methods=["POST"])
 def switch_overview():
     session["active_character_id"] = "overview"
     return redirect(url_for("index"))
 
 
-@app.route("/pull")
+@app.route("/pull", methods=["POST"])
 def manual_pull():
     saved_characters = get_saved_characters()
     if not saved_characters:
@@ -1452,11 +1536,15 @@ def manual_pull():
     return redirect(url_for("index"))
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     logger.info("User signed out of current dashboard session")
     session.clear()
     return redirect(url_for("index"))
+
+
+with app.app_context():
+    init_db()
 
 
 if __name__ == "__main__":

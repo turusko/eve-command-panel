@@ -78,10 +78,13 @@
       display: inline-block;
       padding: 12px 18px;
       border-radius: 999px;
+      border: 0;
       text-decoration: none;
       color: #111;
       background: var(--accent);
       font-weight: 700;
+      font: inherit;
+      cursor: pointer;
     }
 
     .button.pulling {
@@ -187,6 +190,12 @@
       color: var(--muted);
       background: rgba(255, 255, 255, 0.03);
       font-weight: 700;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .inline-form {
+      margin: 0;
     }
 
     .character-tab.active {
@@ -501,9 +510,15 @@
 
       {% if logged_in %}
         <div class="actions">
-          <a class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" href="{{ url_for('manual_pull') }}">{% if manual_pull_in_progress %}Pulling ESI{% else %}Pull ESI{% endif %}</a>
+          <form class="inline-form" method="post" action="{{ url_for('manual_pull') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" {% if manual_pull_in_progress or not manual_pull_enabled %}disabled{% endif %}>{% if manual_pull_in_progress %}Pulling ESI{% else %}Pull ESI{% endif %}</button>
+          </form>
           <a class="button" href="{{ url_for('login') }}">Add Character</a>
-          <a class="button secondary" href="{{ url_for('logout') }}">Sign Out</a>
+          <form class="inline-form" method="post" action="{{ url_for('logout') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button secondary">Sign Out</button>
+          </form>
         </div>
       {% endif %}
     </div>
@@ -519,19 +534,25 @@
       <div class="dashboard">
         {% if characters %}
           <nav class="character-tabs" aria-label="Characters">
-            <a
-              class="character-tab {{ 'active' if active_character_id == 'overview' else '' }}"
-              href="{{ url_for('switch_overview') }}"
-            >
-              Overview
-            </a>
-            {% for character in characters %}
-              <a
-                class="character-tab {{ 'active' if character.character_id == active_character_id else '' }}"
-                href="{{ url_for('switch_character', character_id=character.character_id) }}"
+            <form class="inline-form" method="post" action="{{ url_for('switch_overview') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button
+                type="submit"
+                class="character-tab {{ 'active' if active_character_id == 'overview' else '' }}"
               >
-                {{ character.character_name }}
-              </a>
+                Overview
+              </button>
+            </form>
+            {% for character in characters %}
+              <form class="inline-form" method="post" action="{{ url_for('switch_character', character_id=character.character_id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button
+                  type="submit"
+                  class="character-tab {{ 'active' if character.character_id == active_character_id else '' }}"
+                >
+                  {{ character.character_name }}
+                </button>
+              </form>
             {% endfor %}
           </nav>
         {% endif %}
