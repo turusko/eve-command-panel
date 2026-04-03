@@ -26,7 +26,7 @@ SSO_METADATA_URL = "https://login.eveonline.com/.well-known/oauth-authorization-
 ESI_BASE_URL = "https://esi.evetech.net/latest"
 EVE_IMAGE_BASE_URL = "https://images.evetech.net"
 ESI_COMPATIBILITY_DATE = "2026-04-02"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 CACHE_TTL_SECONDS = 15 * 60
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 10
 BACKGROUND_REFRESH_LEASE_SECONDS = 3 * BACKGROUND_REFRESH_INTERVAL_SECONDS
@@ -243,28 +243,6 @@ def init_db() -> None:
     db = get_db()
     db.execute(
         """
-        CREATE TABLE IF NOT EXISTS characters (
-            character_id INTEGER PRIMARY KEY,
-            character_name TEXT NOT NULL,
-            access_token TEXT NOT NULL,
-            refresh_token TEXT NOT NULL,
-            expires_at INTEGER NOT NULL
-        )
-        """
-    )
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dashboard_cache (
-            character_id INTEGER PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            fetched_at INTEGER NOT NULL,
-            refresh_requested_at INTEGER,
-            FOREIGN KEY(character_id) REFERENCES characters(character_id) ON DELETE CASCADE
-        )
-        """
-    )
-    db.execute(
-        """
         CREATE TABLE IF NOT EXISTS app_state (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -352,94 +330,6 @@ def find_instance_id_for_character(character_id: int) -> str | None:
         (character_id,),
     ).fetchone()
     return row["instance_id"] if row else None
-
-
-def migrate_legacy_data_for_current_instance() -> None:
-    instance_id = get_instance_id()
-    if not instance_id:
-        return
-    db = get_db()
-    migration_done = db.execute(
-        "SELECT value FROM app_state WHERE key = 'legacy_instance_migration_complete'"
-    ).fetchone()
-    if migration_done and migration_done["value"] == "1":
-        return
-
-    existing = db.execute(
-        "SELECT COUNT(*) AS count FROM user_characters WHERE instance_id = ?",
-        (instance_id,),
-    ).fetchone()["count"]
-    if existing:
-        return
-
-    legacy = db.execute("SELECT COUNT(*) AS count FROM characters").fetchone()["count"]
-    if not legacy:
-        return
-
-    for row in db.execute(
-        """
-        SELECT character_id, character_name, access_token, refresh_token, expires_at
-        FROM characters
-        """
-    ).fetchall():
-        db.execute(
-            """
-            INSERT OR IGNORE INTO user_characters (
-                instance_id, character_id, character_name, access_token, refresh_token, expires_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                instance_id,
-                row["character_id"],
-                row["character_name"],
-                row["access_token"],
-                row["refresh_token"],
-                row["expires_at"],
-            ),
-        )
-
-    for row in db.execute(
-        """
-        SELECT character_id, payload_json, fetched_at, refresh_requested_at
-        FROM dashboard_cache
-        """
-    ).fetchall():
-        db.execute(
-            """
-            INSERT OR IGNORE INTO user_dashboard_cache (
-                instance_id, character_id, payload_json, fetched_at, refresh_requested_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                instance_id,
-                row["character_id"],
-                row["payload_json"],
-                row["fetched_at"],
-                row["refresh_requested_at"],
-            ),
-        )
-
-    for row in db.execute("SELECT key, value FROM app_state").fetchall():
-        if row["key"] == "legacy_instance_migration_complete":
-            continue
-        db.execute(
-            """
-            INSERT OR IGNORE INTO user_app_state (instance_id, key, value)
-            VALUES (?, ?, ?)
-            """,
-            (instance_id, row["key"], row["value"]),
-        )
-
-    db.execute(
-        """
-        INSERT INTO app_state (key, value)
-        VALUES ('legacy_instance_migration_complete', '1')
-        ON CONFLICT(key) DO UPDATE SET value = '1'
-        """
-    )
-    db.commit()
 
 
 @app.before_request
