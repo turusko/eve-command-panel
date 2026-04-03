@@ -21,7 +21,9 @@ load_dotenv()
 
 SSO_METADATA_URL = "https://login.eveonline.com/.well-known/oauth-authorization-server"
 ESI_BASE_URL = "https://esi.evetech.net/latest"
+EVE_IMAGE_BASE_URL = "https://images.evetech.net"
 ESI_COMPATIBILITY_DATE = "2026-04-02"
+APP_VERSION = "0.1.0"
 PI_ATTENTION_WINDOW_HOURS = 6
 CACHE_TTL_SECONDS = 15 * 60
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 1 * 60
@@ -372,6 +374,7 @@ def get_overview_character_summaries() -> list[dict]:
             {
                 "character_id": row["character_id"],
                 "character_name": row["character_name"],
+                "portrait_url": f"{EVE_IMAGE_BASE_URL}/characters/{row['character_id']}/portrait?size=128",
                 "next_expiry": next_expiry,
             }
         )
@@ -542,6 +545,7 @@ def index():
         logged_in=bool(saved_characters),
         characters=saved_characters,
         active_character_id=active_character_id,
+        app_version=APP_VERSION,
         overview_summary=overview_summary,
         location_summary=location_summary,
         manual_pull_enabled=can_manual_pull(),
@@ -830,6 +834,7 @@ def build_location_summary(character_auth: dict) -> dict:
     summary = {
         "character_id": character_id,
         "character_name": character["name"],
+        "portrait_url": f"{EVE_IMAGE_BASE_URL}/characters/{character_id}/portrait?size=256",
         "location": location,
         "ship_name": ship_name,
         "wallet_balance": wallet_balance,
