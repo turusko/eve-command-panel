@@ -948,7 +948,6 @@ def manual_pull():
     if not can_manual_pull():
         return redirect(url_for("index", error="Manual pull is on cooldown. Please wait a moment."))
 
-    clear_dashboard_cache()
     for character in get_saved_characters():
         request_dashboard_refresh(character["character_id"])
 
