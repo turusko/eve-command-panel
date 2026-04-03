@@ -27,7 +27,6 @@ ESI_BASE_URL = "https://esi.evetech.net/latest"
 EVE_IMAGE_BASE_URL = "https://images.evetech.net"
 ESI_COMPATIBILITY_DATE = "2026-04-02"
 APP_VERSION = "0.2.0"
-PI_ATTENTION_WINDOW_HOURS = 6
 CACHE_TTL_SECONDS = 15 * 60
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 1 * 60
 BACKGROUND_REFRESH_LEASE_SECONDS = 3 * BACKGROUND_REFRESH_INTERVAL_SECONDS
@@ -35,6 +34,9 @@ MANUAL_PULL_COOLDOWN_SECONDS = 60
 SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "30"))
 CSRF_SESSION_KEY = "csrf_token"
 REFRESHER_LEASE_KEY = "background_refresher_lease"
+PI_ATTENTION_WINDOW_MIN_HOURS = 1
+PI_ATTENTION_WINDOW_MAX_HOURS = 24
+PI_ATTENTION_WINDOW_STATE_KEY = "pi_attention_window_hours"
 EVE_SCOPES = [
     "esi-location.read_location.v1",
     "esi-location.read_ship_type.v1",
@@ -66,6 +68,31 @@ def env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    value = os.getenv(name)
+    if value is None:
+        parsed = default
+    else:
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            parsed = default
+
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+PI_ATTENTION_WINDOW_DEFAULT_HOURS = env_int(
+    "PI_ATTENTION_WINDOW_HOURS",
+    6,
+    minimum=PI_ATTENTION_WINDOW_MIN_HOURS,
+    maximum=PI_ATTENTION_WINDOW_MAX_HOURS,
+)
 
 
 def get_csrf_token() -> str:
@@ -468,6 +495,12 @@ def get_cached_dashboard(character_id: int):
         if journal_entries:
             replace_wallet_journal_entries(instance_id, character_id, journal_entries)
     payload["journal_entries"] = journal_entries
+    pi_summary = payload.get("pi")
+    if pi_summary:
+        pi_summary["extractors_expiring_soon"] = count_colonies_needing_attention(
+            pi_summary.get("colonies", []),
+            get_pi_attention_window_hours(),
+        )
     payload.setdefault(
         "journal_status",
         {
@@ -534,8 +567,22 @@ def clear_dashboard_cache(character_id: int | None = None) -> None:
         db.execute(
             "DELETE FROM user_dashboard_cache WHERE instance_id = ? AND character_id = ?",
             (instance_id, character_id),
-        )
+    )
     db.commit()
+
+
+def remove_character(character_id: int) -> bool:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return False
+
+    db = get_db()
+    cursor = db.execute(
+        "DELETE FROM user_characters WHERE instance_id = ? AND character_id = ?",
+        (instance_id, character_id),
+    )
+    db.commit()
+    return cursor.rowcount > 0
 
 
 def get_app_state(key: str) -> str | None:
@@ -566,6 +613,48 @@ def set_app_state(key: str, value: str | int | None) -> None:
             (instance_id, key, str(value)),
     )
     db.commit()
+
+
+def clamp_pi_attention_window_hours(value: int) -> int:
+    return max(PI_ATTENTION_WINDOW_MIN_HOURS, min(PI_ATTENTION_WINDOW_MAX_HOURS, value))
+
+
+def get_pi_attention_window_hours(instance_id: str | None = None) -> int:
+    if instance_id:
+        row = get_db().execute(
+            "SELECT value FROM user_app_state WHERE instance_id = ? AND key = ?",
+            (instance_id, PI_ATTENTION_WINDOW_STATE_KEY),
+        ).fetchone()
+        value = row["value"] if row else None
+    else:
+        value = get_app_state(PI_ATTENTION_WINDOW_STATE_KEY)
+
+    if value is None:
+        return PI_ATTENTION_WINDOW_DEFAULT_HOURS
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return PI_ATTENTION_WINDOW_DEFAULT_HOURS
+    return clamp_pi_attention_window_hours(parsed)
+
+
+def set_pi_attention_window_hours(value: int) -> None:
+    set_app_state(PI_ATTENTION_WINDOW_STATE_KEY, clamp_pi_attention_window_hours(value))
+
+
+def count_colonies_needing_attention(colonies: list[dict], attention_window_hours: int) -> int:
+    now = datetime.now(timezone.utc)
+    threshold_seconds = attention_window_hours * 3600
+    attention_count = 0
+
+    for colony in colonies:
+        next_expiry = parse_iso_datetime(colony.get("next_expiry"))
+        if not next_expiry:
+            continue
+        if next_expiry <= now or (next_expiry - now).total_seconds() <= threshold_seconds:
+            attention_count += 1
+    return attention_count
 
 
 def try_acquire_refresh_lease() -> bool:
@@ -671,20 +760,82 @@ def update_character_tokens(character_id: int, token_data: dict) -> None:
     db.commit()
 
 
+def build_character_tab_badges(
+    payload: dict | None, cached_at: int | None, attention_window_hours: int
+) -> list[dict]:
+    stale_badge = None
+    pi_badge = None
+    security_badge = None
+    now = datetime.now(timezone.utc)
+
+    if payload:
+        security_status = payload.get("solar_system", {}).get("security_status")
+        if security_status is not None:
+            if security_status >= 0.5:
+                security_label = f"HS {security_status:.1f}"
+                security_tone = "security-high"
+            elif security_status > 0:
+                security_label = f"LS {security_status:.1f}"
+                security_tone = "security-low"
+            else:
+                security_label = "NS 0.0"
+                security_tone = "security-null"
+            security_badge = {"label": security_label, "tone": security_tone}
+
+        next_expiry = parse_iso_datetime(payload.get("pi", {}).get("next_expiry"))
+        if next_expiry:
+            remaining_seconds = int((next_expiry - now).total_seconds())
+            if remaining_seconds <= 0:
+                pi_tone = "warning"
+            elif remaining_seconds <= attention_window_hours * 3600:
+                pi_tone = "security-borderline"
+            else:
+                pi_tone = None
+            if pi_tone:
+                pi_badge = {
+                    "label": f"PI {format_countdown(next_expiry.isoformat().replace('+00:00', 'Z'))}",
+                    "tone": pi_tone,
+                }
+
+    if cached_at is None:
+        stale_badge = {"label": "No Cache", "tone": "security-borderline"}
+    elif int(time.time()) - int(cached_at) >= CACHE_TTL_SECONDS:
+        stale_badge = {"label": "Stale", "tone": "security-borderline"}
+
+    for badge in (stale_badge, pi_badge, security_badge):
+        if badge:
+            return [badge]
+    return []
+
+
 def get_saved_characters() -> list[dict]:
     instance_id = get_instance_id()
     if not instance_id:
         return []
+    attention_window_hours = get_pi_attention_window_hours(instance_id)
     rows = get_db().execute(
         """
-        SELECT character_id, character_name
-        FROM user_characters
-        WHERE instance_id = ?
-        ORDER BY character_name COLLATE NOCASE
+        SELECT c.character_id, c.character_name, dc.payload_json, dc.fetched_at
+        FROM user_characters c
+        LEFT JOIN user_dashboard_cache dc
+            ON dc.instance_id = c.instance_id AND dc.character_id = c.character_id
+        WHERE c.instance_id = ?
+        ORDER BY c.character_name COLLATE NOCASE
         """,
         (instance_id,),
     ).fetchall()
-    return [dict(row) for row in rows]
+
+    characters = []
+    for row in rows:
+        payload = json.loads(row["payload_json"]) if row["payload_json"] and row["payload_json"] != "{}" else None
+        characters.append(
+            {
+                "character_id": row["character_id"],
+                "character_name": row["character_name"],
+                "tab_badges": build_character_tab_badges(payload, row["fetched_at"], attention_window_hours),
+            }
+        )
+    return characters
 
 
 def get_overview_wallet_total() -> float:
@@ -859,6 +1010,7 @@ def index():
     location_summary = None
     overview_summary = None
     error = request.args.get("error")
+    pi_attention_window_hours = get_pi_attention_window_hours()
 
     if active_character_id == "overview":
         overview_summary = {
@@ -880,6 +1032,8 @@ def index():
         characters=saved_characters,
         active_character_id=active_character_id,
         app_version=APP_VERSION,
+        pi_attention_window_hours=pi_attention_window_hours,
+        pi_attention_window_options=range(PI_ATTENTION_WINDOW_MIN_HOURS, PI_ATTENTION_WINDOW_MAX_HOURS + 1),
         overview_summary=overview_summary,
         location_summary=location_summary,
         manual_pull_enabled=can_manual_pull(),
@@ -1122,7 +1276,7 @@ def get_first_present(mapping: dict, *keys):
     return None
 
 
-def build_pi_summary(character_auth: dict, colonies: list[dict]) -> dict:
+def build_pi_summary(character_auth: dict, colonies: list[dict], attention_window_hours: int) -> dict:
     system_cache: dict[int, dict] = {}
     colony_cards = []
     extractors_expiring_soon = 0
@@ -1181,7 +1335,7 @@ def build_pi_summary(character_auth: dict, colonies: list[dict]) -> dict:
         if soonest_colony_expiry:
             if soonest_colony_expiry <= now:
                 extractors_expiring_soon += 1
-            elif (soonest_colony_expiry - now).total_seconds() <= PI_ATTENTION_WINDOW_HOURS * 3600:
+            elif (soonest_colony_expiry - now).total_seconds() <= attention_window_hours * 3600:
                 extractors_expiring_soon += 1
 
             if next_expiry is None or soonest_colony_expiry < next_expiry:
@@ -1211,7 +1365,7 @@ def build_pi_summary(character_auth: dict, colonies: list[dict]) -> dict:
     }
 
 
-def build_location_summary(character_auth: dict) -> dict:
+def build_location_summary(character_auth: dict, attention_window_hours: int) -> dict:
     character_id = character_auth["character_id"]
     location = fetch_character_location(character_auth)
     character = fetch_character_profile(character_id)
@@ -1236,7 +1390,7 @@ def build_location_summary(character_auth: dict) -> dict:
         "wallet_balance": wallet_balance,
         "journal_entries": journal_entries,
         "journal_status": build_wallet_journal_status(journal_entries, journal_metadata),
-        "pi": build_pi_summary(character_auth, colonies),
+        "pi": build_pi_summary(character_auth, colonies, attention_window_hours),
     }
 
     solar_system_id = location.get("solar_system_id")
@@ -1332,7 +1486,7 @@ def refresh_dashboard_cache_for_character(instance_id: str, character_id: int) -
     character_auth = refresh_access_token_if_needed_for_worker(instance_id, character_auth)
     if not character_auth:
         return
-    summary = build_location_summary(character_auth)
+    summary = build_location_summary(character_auth, get_pi_attention_window_hours(instance_id))
     save_cached_dashboard_for_instance(instance_id, character_id, summary)
 
 
@@ -1510,6 +1664,26 @@ def switch_character(character_id: int):
     return redirect(url_for("index"))
 
 
+@app.route("/characters/<int:character_id>/remove", methods=["POST"])
+def remove_character_route(character_id: int):
+    if not get_character_auth(character_id):
+        return redirect(url_for("index", error="Character not found."))
+
+    removed = remove_character(character_id)
+    if not removed:
+        return redirect(url_for("index", error="Could not remove that character from this dashboard."))
+
+    remaining_characters = get_saved_characters()
+    if remaining_characters:
+        if session.get("active_character_id") == character_id:
+            session["active_character_id"] = "overview"
+    else:
+        session["active_character_id"] = "overview"
+
+    logger.info("Removed character %s from current dashboard", character_id)
+    return redirect(url_for("index"))
+
+
 @app.route("/overview", methods=["POST"])
 def switch_overview():
     session["active_character_id"] = "overview"
@@ -1531,6 +1705,40 @@ def manual_pull():
     set_app_state("manual_pull_in_progress", "1")
     set_app_state("last_manual_pull_completed_at", None)
     logger.info("Manual ESI pull requested for %s linked characters", len(saved_characters))
+    return redirect(url_for("index"))
+
+
+@app.route("/settings/pi-attention-window", methods=["POST"])
+def update_pi_attention_window():
+    if not get_saved_characters():
+        return redirect(url_for("index", error="Link a character before changing PI settings."))
+
+    try:
+        selected_hours = int(request.form.get("pi_attention_window_hours", "").strip())
+    except ValueError:
+        return redirect(
+            url_for(
+                "index",
+                error=(
+                    f"PI attention window must be between {PI_ATTENTION_WINDOW_MIN_HOURS} "
+                    f"and {PI_ATTENTION_WINDOW_MAX_HOURS} hours."
+                ),
+            )
+        )
+
+    if not PI_ATTENTION_WINDOW_MIN_HOURS <= selected_hours <= PI_ATTENTION_WINDOW_MAX_HOURS:
+        return redirect(
+            url_for(
+                "index",
+                error=(
+                    f"PI attention window must be between {PI_ATTENTION_WINDOW_MIN_HOURS} "
+                    f"and {PI_ATTENTION_WINDOW_MAX_HOURS} hours."
+                ),
+            )
+        )
+
+    set_pi_attention_window_hours(selected_hours)
+    logger.info("Updated PI attention window to %s hours for current dashboard", get_pi_attention_window_hours())
     return redirect(url_for("index"))
 
 
