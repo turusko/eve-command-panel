@@ -188,6 +188,36 @@ Open `http://127.0.0.1:5000`.
 - If you remove the `data` folder, you remove the saved database too.
 - If you are using Docker Desktop on Windows and `${PWD}` does not work in your shell, replace it with the full folder path.
 
+### Linux Redeploy Script
+
+If you are deploying on Linux, you can use the included redeploy script to stop the current container, rebuild the image, and start it again without losing the mounted database or log files.
+
+1. Make the script executable
+
+```bash
+chmod +x scripts/redeploy-linux.sh
+```
+
+2. Run the redeploy
+
+```bash
+./scripts/redeploy-linux.sh
+```
+
+By default it uses:
+
+- image name: `eve-esi-dashboard`
+- container name: `eve-esi-dashboard`
+- port: `5000`
+- env file: `./.env`
+- data directory: `./data`
+
+You can override them when needed, for example:
+
+```bash
+APP_PORT=8080 CONTAINER_NAME=eve-dashboard-prod ./scripts/redeploy-linux.sh
+```
+
 ## Notes
 
 - This app uses the server-side authorization code flow with your client secret.

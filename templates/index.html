@@ -692,9 +692,7 @@
                       ESI expires
                       {{ location_summary.journal_status.esi_expires | eve_time if location_summary.journal_status.esi_expires else "Unknown" }}.
                     </p>
-                    <p class="cache-note">
-                      Cache-Control: <code>{{ location_summary.journal_status.esi_cache_control if location_summary.journal_status.esi_cache_control else "Unknown" }}</code>
-                    </p>
+
                   </div>
                 {% endif %}
               </section>
