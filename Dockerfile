@@ -5,6 +5,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DATABASE_PATH=/data/eve_dashboard.db
+ENV LOG_PATH=/data/eve_dashboard.log
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

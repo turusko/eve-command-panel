@@ -1,13 +1,15 @@
 import base64
 import json
+import logging
 import math
 import os
 import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -23,7 +25,7 @@ SSO_METADATA_URL = "https://login.eveonline.com/.well-known/oauth-authorization-
 ESI_BASE_URL = "https://esi.evetech.net/latest"
 EVE_IMAGE_BASE_URL = "https://images.evetech.net"
 ESI_COMPATIBILITY_DATE = "2026-04-02"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 PI_ATTENTION_WINDOW_HOURS = 6
 CACHE_TTL_SECONDS = 15 * 60
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 1 * 60
@@ -38,9 +40,43 @@ EVE_SCOPES = [
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).with_name("eve_dashboard.db")))
+LOG_PATH = Path(os.getenv("LOG_PATH", DATABASE_PATH.with_name("eve_dashboard.log")))
 REFRESHER_LOCK = threading.Lock()
 REFRESHER_STARTED = False
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configure_logging() -> logging.Logger:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("eve_dashboard")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(threadName)s %(message)s")
+
+    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_048_576, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    logger.propagate = False
+    return logger
+
+
+logger = configure_logging()
 
 
 @app.template_filter("isk")
@@ -105,6 +141,15 @@ def format_next_update_time(value):
     return next_update.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -117,6 +162,7 @@ def get_db():
         DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
         g.db = sqlite3.connect(DATABASE_PATH)
         g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -152,6 +198,174 @@ def init_db() -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_characters (
+            instance_id TEXT NOT NULL,
+            character_id INTEGER NOT NULL,
+            character_name TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            PRIMARY KEY (instance_id, character_id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_dashboard_cache (
+            instance_id TEXT NOT NULL,
+            character_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            refresh_requested_at INTEGER,
+            PRIMARY KEY (instance_id, character_id),
+            FOREIGN KEY(instance_id, character_id) REFERENCES user_characters(instance_id, character_id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_app_state (
+            instance_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            PRIMARY KEY (instance_id, key)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_wallet_journal (
+            instance_id TEXT NOT NULL,
+            character_id INTEGER NOT NULL,
+            entry_id INTEGER NOT NULL,
+            entry_date TEXT NOT NULL,
+            ref_type TEXT,
+            amount REAL,
+            balance REAL,
+            description TEXT,
+            raw_json TEXT NOT NULL,
+            PRIMARY KEY (instance_id, character_id, entry_id),
+            FOREIGN KEY(instance_id, character_id) REFERENCES user_characters(instance_id, character_id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.commit()
+
+
+def get_instance_id(create: bool = False) -> str | None:
+    instance_id = session.get("instance_id")
+    if instance_id:
+        session.permanent = True
+        return instance_id
+    if not create:
+        return None
+    session.permanent = True
+    instance_id = secrets.token_urlsafe(24)
+    session["instance_id"] = instance_id
+    return instance_id
+
+
+def find_instance_id_for_character(character_id: int) -> str | None:
+    row = get_db().execute(
+        """
+        SELECT instance_id
+        FROM user_characters
+        WHERE character_id = ?
+        ORDER BY expires_at DESC
+        LIMIT 1
+        """,
+        (character_id,),
+    ).fetchone()
+    return row["instance_id"] if row else None
+
+
+def migrate_legacy_data_for_current_instance() -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
+    db = get_db()
+    migration_done = db.execute(
+        "SELECT value FROM app_state WHERE key = 'legacy_instance_migration_complete'"
+    ).fetchone()
+    if migration_done and migration_done["value"] == "1":
+        return
+
+    existing = db.execute(
+        "SELECT COUNT(*) AS count FROM user_characters WHERE instance_id = ?",
+        (instance_id,),
+    ).fetchone()["count"]
+    if existing:
+        return
+
+    legacy = db.execute("SELECT COUNT(*) AS count FROM characters").fetchone()["count"]
+    if not legacy:
+        return
+
+    for row in db.execute(
+        """
+        SELECT character_id, character_name, access_token, refresh_token, expires_at
+        FROM characters
+        """
+    ).fetchall():
+        db.execute(
+            """
+            INSERT OR IGNORE INTO user_characters (
+                instance_id, character_id, character_name, access_token, refresh_token, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                instance_id,
+                row["character_id"],
+                row["character_name"],
+                row["access_token"],
+                row["refresh_token"],
+                row["expires_at"],
+            ),
+        )
+
+    for row in db.execute(
+        """
+        SELECT character_id, payload_json, fetched_at, refresh_requested_at
+        FROM dashboard_cache
+        """
+    ).fetchall():
+        db.execute(
+            """
+            INSERT OR IGNORE INTO user_dashboard_cache (
+                instance_id, character_id, payload_json, fetched_at, refresh_requested_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                instance_id,
+                row["character_id"],
+                row["payload_json"],
+                row["fetched_at"],
+                row["refresh_requested_at"],
+            ),
+        )
+
+    for row in db.execute("SELECT key, value FROM app_state").fetchall():
+        if row["key"] == "legacy_instance_migration_complete":
+            continue
+        db.execute(
+            """
+            INSERT OR IGNORE INTO user_app_state (instance_id, key, value)
+            VALUES (?, ?, ?)
+            """,
+            (instance_id, row["key"], row["value"]),
+        )
+
+    db.execute(
+        """
+        INSERT INTO app_state (key, value)
+        VALUES ('legacy_instance_migration_complete', '1')
+        ON CONFLICT(key) DO UPDATE SET value = '1'
+        """
+    )
     db.commit()
 
 
@@ -167,19 +381,21 @@ def close_db(exception):
         db.close()
 
 
-def save_character_auth(character_id: int, character_name: str, token_data: dict) -> None:
+def save_character_auth(character_id: int, character_name: str, token_data: dict, instance_id: str | None = None) -> None:
+    instance_id = instance_id or get_instance_id(create=True)
     db = get_db()
     db.execute(
         """
-        INSERT INTO characters (character_id, character_name, access_token, refresh_token, expires_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(character_id) DO UPDATE SET
+        INSERT INTO user_characters (instance_id, character_id, character_name, access_token, refresh_token, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(instance_id, character_id) DO UPDATE SET
             character_name = excluded.character_name,
             access_token = excluded.access_token,
             refresh_token = excluded.refresh_token,
             expires_at = excluded.expires_at
         """,
         (
+            instance_id,
             character_id,
             character_name,
             token_data["access_token"],
@@ -191,79 +407,122 @@ def save_character_auth(character_id: int, character_name: str, token_data: dict
 
 
 def get_cached_dashboard(character_id: int):
+    instance_id = get_instance_id()
+    if not instance_id:
+        return None
     row = get_db().execute(
         """
         SELECT payload_json, fetched_at, refresh_requested_at
-        FROM dashboard_cache
-        WHERE character_id = ?
+        FROM user_dashboard_cache
+        WHERE instance_id = ? AND character_id = ?
         """,
-        (character_id,),
+        (instance_id, character_id),
     ).fetchone()
     if not row:
         return None
     payload = json.loads(row["payload_json"])
+    journal_entries = get_wallet_journal_entries(character_id, instance_id=instance_id, limit=5)
+    if not journal_entries:
+        journal_entries = payload.get("journal_entries", [])
+        if journal_entries:
+            replace_wallet_journal_entries(instance_id, character_id, journal_entries)
+    payload["journal_entries"] = journal_entries
+    payload.setdefault(
+        "journal_status",
+        {
+            "newest_entry_time": journal_entries[0].get("date") if journal_entries else None,
+            "freshness_lag_minutes": None,
+            "esi_expires": None,
+            "esi_cache_control": None,
+            "esi_last_modified": None,
+            "esi_etag": None,
+            "esi_response_date": None,
+        },
+    )
     payload["_cached_at"] = row["fetched_at"]
     payload["_refresh_requested_at"] = row["refresh_requested_at"]
     return payload
 
 
 def save_cached_dashboard(character_id: int, payload: dict) -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
+    replace_wallet_journal_entries(instance_id, character_id, payload.get("journal_entries", []))
     db = get_db()
     db.execute(
         """
-        INSERT INTO dashboard_cache (character_id, payload_json, fetched_at, refresh_requested_at)
-        VALUES (?, ?, ?, NULL)
-        ON CONFLICT(character_id) DO UPDATE SET
+        INSERT INTO user_dashboard_cache (instance_id, character_id, payload_json, fetched_at, refresh_requested_at)
+        VALUES (?, ?, ?, ?, NULL)
+        ON CONFLICT(instance_id, character_id) DO UPDATE SET
             payload_json = excluded.payload_json,
             fetched_at = excluded.fetched_at,
             refresh_requested_at = NULL
         """,
-        (character_id, json.dumps(payload), int(time.time())),
+        (instance_id, character_id, json.dumps(payload), int(time.time())),
     )
     db.commit()
 
 
 def request_dashboard_refresh(character_id: int) -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
     db = get_db()
     now = int(time.time())
     db.execute(
         """
-        INSERT INTO dashboard_cache (character_id, payload_json, fetched_at, refresh_requested_at)
-        VALUES (?, '{}', 0, ?)
-        ON CONFLICT(character_id) DO UPDATE SET
+        INSERT INTO user_dashboard_cache (instance_id, character_id, payload_json, fetched_at, refresh_requested_at)
+        VALUES (?, ?, '{}', 0, ?)
+        ON CONFLICT(instance_id, character_id) DO UPDATE SET
             refresh_requested_at = excluded.refresh_requested_at
         """,
-        (character_id, now),
+        (instance_id, character_id, now),
     )
     db.commit()
 
 
 def clear_dashboard_cache(character_id: int | None = None) -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
     db = get_db()
     if character_id is None:
-        db.execute("DELETE FROM dashboard_cache")
+        db.execute("DELETE FROM user_dashboard_cache WHERE instance_id = ?", (instance_id,))
     else:
-        db.execute("DELETE FROM dashboard_cache WHERE character_id = ?", (character_id,))
+        db.execute(
+            "DELETE FROM user_dashboard_cache WHERE instance_id = ? AND character_id = ?",
+            (instance_id, character_id),
+        )
     db.commit()
 
 
 def get_app_state(key: str) -> str | None:
-    row = get_db().execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    instance_id = get_instance_id()
+    if not instance_id:
+        return None
+    row = get_db().execute(
+        "SELECT value FROM user_app_state WHERE instance_id = ? AND key = ?",
+        (instance_id, key),
+    ).fetchone()
     return row["value"] if row else None
 
 
 def set_app_state(key: str, value: str | int | None) -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
     db = get_db()
     if value is None:
-        db.execute("DELETE FROM app_state WHERE key = ?", (key,))
+        db.execute("DELETE FROM user_app_state WHERE instance_id = ? AND key = ?", (instance_id, key))
     else:
         db.execute(
             """
-            INSERT INTO app_state (key, value)
-            VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            INSERT INTO user_app_state (instance_id, key, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(instance_id, key) DO UPDATE SET value = excluded.value
             """,
-            (key, str(value)),
+            (instance_id, key, str(value)),
         )
     db.commit()
 
@@ -314,17 +573,21 @@ def attach_cache_metadata(payload: dict | None) -> dict | None:
 
 
 def update_character_tokens(character_id: int, token_data: dict) -> None:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return
     db = get_db()
     db.execute(
         """
-        UPDATE characters
+        UPDATE user_characters
         SET access_token = ?, refresh_token = ?, expires_at = ?
-        WHERE character_id = ?
+        WHERE instance_id = ? AND character_id = ?
         """,
         (
             token_data["access_token"],
             token_data["refresh_token"],
             int(time.time()) + int(token_data["expires_in"]),
+            instance_id,
             character_id,
         ),
     )
@@ -332,19 +595,33 @@ def update_character_tokens(character_id: int, token_data: dict) -> None:
 
 
 def get_saved_characters() -> list[dict]:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return []
     rows = get_db().execute(
-        "SELECT character_id, character_name FROM characters ORDER BY character_name COLLATE NOCASE"
+        """
+        SELECT character_id, character_name
+        FROM user_characters
+        WHERE instance_id = ?
+        ORDER BY character_name COLLATE NOCASE
+        """,
+        (instance_id,),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
 def get_overview_wallet_total() -> float:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return 0.0
     rows = get_db().execute(
         """
         SELECT payload_json
-        FROM dashboard_cache
-        WHERE payload_json IS NOT NULL AND payload_json != '{}'
+        FROM user_dashboard_cache
+        WHERE instance_id = ? AND payload_json IS NOT NULL AND payload_json != '{}'
         """
+        ,
+        (instance_id,),
     ).fetchall()
     total = 0.0
     for row in rows:
@@ -354,13 +631,20 @@ def get_overview_wallet_total() -> float:
 
 
 def get_overview_character_summaries() -> list[dict]:
+    instance_id = get_instance_id()
+    if not instance_id:
+        return []
     rows = get_db().execute(
         """
         SELECT c.character_id, c.character_name, dc.payload_json
-        FROM characters c
-        LEFT JOIN dashboard_cache dc ON dc.character_id = c.character_id
+        FROM user_characters c
+        LEFT JOIN user_dashboard_cache dc
+            ON dc.instance_id = c.instance_id AND dc.character_id = c.character_id
+        WHERE c.instance_id = ?
         ORDER BY c.character_name COLLATE NOCASE
         """
+        ,
+        (instance_id,),
     ).fetchall()
 
     summaries = []
@@ -385,13 +669,16 @@ def get_overview_character_summaries() -> list[dict]:
 def get_character_auth(character_id: int | None):
     if not character_id:
         return None
+    instance_id = get_instance_id()
+    if not instance_id:
+        return None
     row = get_db().execute(
         """
         SELECT character_id, character_name, access_token, refresh_token, expires_at
-        FROM characters
-        WHERE character_id = ?
+        FROM user_characters
+        WHERE instance_id = ? AND character_id = ?
         """,
-        (character_id,),
+        (instance_id, character_id),
     ).fetchone()
     return dict(row) if row else None
 
@@ -477,32 +764,6 @@ def refresh_access_token_if_needed(character_auth: dict | None) -> dict | None:
     if session.get("active_character_id") == character_auth["character_id"]:
         session["active_character_id"] = character_auth["character_id"]
     return refreshed_character
-
-
-def refresh_access_token_if_needed_for_worker(character_auth: dict | None) -> dict | None:
-    if not character_auth:
-        return None
-    if character_auth["expires_at"] > int(time.time()) + 60:
-        return character_auth
-
-    metadata = get_sso_metadata()
-    response = requests.post(
-        metadata["token_endpoint"],
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": character_auth["refresh_token"],
-        },
-        headers={
-            "Authorization": get_basic_auth_header(),
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Host": "login.eveonline.com",
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    token_data = response.json()
-    update_character_tokens(character_auth["character_id"], token_data)
-    return get_character_auth(character_auth["character_id"])
 
 
 def login_required(view_func):
@@ -605,7 +866,23 @@ def callback():
     save_token(token_data)
     character_id = parse_character_id(token_data["access_token"])
     character = fetch_character_profile(character_id)
-    save_character_auth(character_id, character["name"], token_data)
+    current_instance_id = get_instance_id()
+    existing_instance_id = find_instance_id_for_character(character_id)
+    current_has_characters = bool(get_saved_characters()) if current_instance_id else False
+
+    if current_has_characters:
+        if existing_instance_id and existing_instance_id != current_instance_id:
+            session.pop("oauth_state", None)
+            session.pop("pending_token_data", None)
+            return redirect(
+                url_for("index", error="That character is already linked to another dashboard.")
+            )
+        target_instance_id = current_instance_id
+    else:
+        target_instance_id = existing_instance_id or get_instance_id(create=True)
+        session["instance_id"] = target_instance_id
+
+    save_character_auth(character_id, character["name"], token_data, instance_id=target_instance_id)
     if session.get("active_character_id") in (None, "overview"):
         session["active_character_id"] = "overview"
     request_dashboard_refresh(character_id)
@@ -673,7 +950,7 @@ def fetch_wallet_balance(character_auth: dict) -> float:
     return response.json()
 
 
-def fetch_wallet_journal(character_auth: dict, limit: int = 5) -> list[dict]:
+def fetch_wallet_journal(character_auth: dict, limit: int = 5) -> tuple[list[dict], dict]:
     character_id = character_auth["character_id"]
     response = requests.get(
         f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
@@ -684,7 +961,56 @@ def fetch_wallet_journal(character_auth: dict, limit: int = 5) -> list[dict]:
     response.raise_for_status()
     entries = response.json()
     entries.sort(key=lambda entry: (entry.get("date", ""), entry.get("id", 0)), reverse=True)
-    return entries[:limit]
+    newest_entry_time = entries[0].get("date") if entries else None
+    metadata = {
+        "esi_expires": response.headers.get("Expires"),
+        "esi_cache_control": response.headers.get("Cache-Control"),
+        "esi_last_modified": response.headers.get("Last-Modified"),
+        "esi_etag": response.headers.get("ETag"),
+        "esi_response_date": response.headers.get("Date"),
+        "newest_entry_time": newest_entry_time,
+    }
+    logger.info(
+        "Wallet journal fetch for %s: newest=%s expires=%s cache_control=%s last_modified=%s etag=%s",
+        character_id,
+        metadata["newest_entry_time"],
+        metadata["esi_expires"],
+        metadata["esi_cache_control"],
+        metadata["esi_last_modified"],
+        metadata["esi_etag"],
+    )
+    return entries[:limit], metadata
+
+
+def build_wallet_journal_status(entries: list[dict], metadata: dict) -> dict:
+    newest_entry_time = metadata.get("newest_entry_time") or (entries[0].get("date") if entries else None)
+    newest_dt = parse_iso_datetime(newest_entry_time)
+    now = datetime.now(timezone.utc)
+    freshness_lag_minutes = None
+    if newest_dt:
+        freshness_lag_minutes = max(0, int((now - newest_dt).total_seconds() // 60))
+
+    expires_text = metadata.get("esi_expires")
+    expires_dt = parse_iso_datetime(expires_text)
+    if expires_dt is None and expires_text:
+        try:
+            from email.utils import parsedate_to_datetime
+
+            expires_dt = parsedate_to_datetime(expires_text)
+            if expires_dt.tzinfo is None:
+                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            expires_dt = None
+
+    return {
+        "newest_entry_time": newest_entry_time,
+        "freshness_lag_minutes": freshness_lag_minutes,
+        "esi_expires": expires_dt.isoformat().replace("+00:00", "Z") if expires_dt else expires_text,
+        "esi_cache_control": metadata.get("esi_cache_control"),
+        "esi_last_modified": metadata.get("esi_last_modified"),
+        "esi_etag": metadata.get("esi_etag"),
+        "esi_response_date": metadata.get("esi_response_date"),
+    }
 
 
 def fetch_planetary_colonies(character_auth: dict) -> list[dict]:
@@ -821,7 +1147,7 @@ def build_location_summary(character_auth: dict) -> dict:
     character = fetch_character_profile(character_id)
     ship = fetch_current_ship(character_auth)
     wallet_balance = fetch_wallet_balance(character_auth)
-    journal_entries = fetch_wallet_journal(character_auth, limit=5)
+    journal_entries, journal_metadata = fetch_wallet_journal(character_auth, limit=5)
     colonies = fetch_planetary_colonies(character_auth)
 
     ship_name = "Unknown"
@@ -839,6 +1165,7 @@ def build_location_summary(character_auth: dict) -> dict:
         "ship_name": ship_name,
         "wallet_balance": wallet_balance,
         "journal_entries": journal_entries,
+        "journal_status": build_wallet_journal_status(journal_entries, journal_metadata),
         "pi": build_pi_summary(character_auth, colonies),
     }
 
@@ -854,41 +1181,194 @@ def build_location_summary(character_auth: dict) -> dict:
     return summary
 
 
-def refresh_dashboard_cache_for_character(character_id: int) -> None:
-    character_auth = get_character_auth(character_id)
+def get_character_auth_for_instance(instance_id: str, character_id: int):
+    row = get_db().execute(
+        """
+        SELECT character_id, character_name, access_token, refresh_token, expires_at
+        FROM user_characters
+        WHERE instance_id = ? AND character_id = ?
+        """,
+        (instance_id, character_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_character_tokens_for_instance(instance_id: str, character_id: int, token_data: dict) -> None:
+    db = get_db()
+    db.execute(
+        """
+        UPDATE user_characters
+        SET access_token = ?, refresh_token = ?, expires_at = ?
+        WHERE instance_id = ? AND character_id = ?
+        """,
+        (
+            token_data["access_token"],
+            token_data["refresh_token"],
+            int(time.time()) + int(token_data["expires_in"]),
+            instance_id,
+            character_id,
+        ),
+    )
+    db.commit()
+
+
+def refresh_access_token_if_needed_for_worker(instance_id: str, character_auth: dict | None) -> dict | None:
+    if not character_auth:
+        return None
+    if character_auth["expires_at"] > int(time.time()) + 60:
+        return character_auth
+
+    metadata = get_sso_metadata()
+    response = requests.post(
+        metadata["token_endpoint"],
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": character_auth["refresh_token"],
+        },
+        headers={
+            "Authorization": get_basic_auth_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Host": "login.eveonline.com",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    update_character_tokens_for_instance(instance_id, character_auth["character_id"], token_data)
+    return get_character_auth_for_instance(instance_id, character_auth["character_id"])
+
+
+def save_cached_dashboard_for_instance(instance_id: str, character_id: int, payload: dict) -> None:
+    replace_wallet_journal_entries(instance_id, character_id, payload.get("journal_entries", []))
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO user_dashboard_cache (instance_id, character_id, payload_json, fetched_at, refresh_requested_at)
+        VALUES (?, ?, ?, ?, NULL)
+        ON CONFLICT(instance_id, character_id) DO UPDATE SET
+            payload_json = excluded.payload_json,
+            fetched_at = excluded.fetched_at,
+            refresh_requested_at = NULL
+        """,
+        (instance_id, character_id, json.dumps(payload), int(time.time())),
+    )
+    db.commit()
+
+
+def refresh_dashboard_cache_for_character(instance_id: str, character_id: int) -> None:
+    character_auth = get_character_auth_for_instance(instance_id, character_id)
     if not character_auth:
         return
-    character_auth = refresh_access_token_if_needed_for_worker(character_auth)
+    character_auth = refresh_access_token_if_needed_for_worker(instance_id, character_auth)
     if not character_auth:
         return
     summary = build_location_summary(character_auth)
-    save_cached_dashboard(character_id, summary)
+    save_cached_dashboard_for_instance(instance_id, character_id, summary)
 
 
-def get_characters_needing_refresh() -> list[int]:
+def replace_wallet_journal_entries(
+    instance_id: str, character_id: int, journal_entries: list[dict]
+) -> None:
+    db = get_db()
+    db.execute(
+        "DELETE FROM user_wallet_journal WHERE instance_id = ? AND character_id = ?",
+        (instance_id, character_id),
+    )
+    for entry in journal_entries:
+        entry_id = entry.get("id")
+        entry_date = entry.get("date")
+        if entry_id is None or not entry_date:
+            continue
+        db.execute(
+            """
+            INSERT INTO user_wallet_journal (
+                instance_id, character_id, entry_id, entry_date, ref_type, amount, balance, description, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                instance_id,
+                character_id,
+                int(entry_id),
+                entry_date,
+                entry.get("ref_type"),
+                entry.get("amount"),
+                entry.get("balance"),
+                entry.get("description"),
+                json.dumps(entry),
+            ),
+        )
+    db.commit()
+
+
+def get_wallet_journal_entries(
+    character_id: int, instance_id: str | None = None, limit: int = 5
+) -> list[dict]:
+    instance_id = instance_id or get_instance_id()
+    if not instance_id:
+        return []
+    rows = get_db().execute(
+        """
+        SELECT raw_json
+        FROM user_wallet_journal
+        WHERE instance_id = ? AND character_id = ?
+        ORDER BY entry_date DESC, entry_id DESC
+        LIMIT ?
+        """,
+        (instance_id, character_id, limit),
+    ).fetchall()
+    return [json.loads(row["raw_json"]) for row in rows]
+
+
+def get_characters_needing_refresh() -> list[tuple[str, int]]:
     now = int(time.time())
     rows = get_db().execute(
         """
-        SELECT c.character_id
-        FROM characters c
-        LEFT JOIN dashboard_cache dc ON dc.character_id = c.character_id
+        SELECT c.instance_id, c.character_id
+        FROM user_characters c
+        LEFT JOIN user_dashboard_cache dc
+            ON dc.instance_id = c.instance_id AND dc.character_id = c.character_id
         WHERE dc.character_id IS NULL
            OR dc.fetched_at < ?
            OR (dc.refresh_requested_at IS NOT NULL AND dc.refresh_requested_at <= ?)
-        ORDER BY c.character_name COLLATE NOCASE
+        ORDER BY c.instance_id, c.character_name COLLATE NOCASE
         """,
         (now - CACHE_TTL_SECONDS, now),
     ).fetchall()
-    return [row["character_id"] for row in rows]
+    return [(row["instance_id"], row["character_id"]) for row in rows]
 
 
 def finalize_manual_pull_if_complete() -> None:
-    if not is_manual_pull_in_progress():
-        return
-    if get_characters_needing_refresh():
-        return
-    set_app_state("manual_pull_in_progress", "0")
-    set_app_state("last_manual_pull_completed_at", int(time.time()))
+    pending_by_instance = {instance_id for instance_id, _ in get_characters_needing_refresh()}
+    rows = get_db().execute(
+        """
+        SELECT instance_id
+        FROM user_app_state
+        WHERE key = 'manual_pull_in_progress' AND value = '1'
+        """
+    ).fetchall()
+    for row in rows:
+        instance_id = row["instance_id"]
+        if instance_id in pending_by_instance:
+            continue
+        set_app_state_for_instance(instance_id, "manual_pull_in_progress", "0")
+        set_app_state_for_instance(instance_id, "last_manual_pull_completed_at", int(time.time()))
+
+
+def set_app_state_for_instance(instance_id: str, key: str, value: str | int | None) -> None:
+    db = get_db()
+    if value is None:
+        db.execute("DELETE FROM user_app_state WHERE instance_id = ? AND key = ?", (instance_id, key))
+    else:
+        db.execute(
+            """
+            INSERT INTO user_app_state (instance_id, key, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(instance_id, key) DO UPDATE SET value = excluded.value
+            """,
+            (instance_id, key, str(value)),
+        )
+    db.commit()
 
 
 def background_refresh_loop():
@@ -896,14 +1376,19 @@ def background_refresh_loop():
         try:
             with app.app_context():
                 init_db()
-                for character_id in get_characters_needing_refresh():
+                for instance_id, character_id in get_characters_needing_refresh():
                     try:
-                        refresh_dashboard_cache_for_character(character_id)
+                        refresh_dashboard_cache_for_character(instance_id, character_id)
                     except Exception:
+                        logger.exception(
+                            "Background refresh failed for instance %s character %s",
+                            instance_id,
+                            character_id,
+                        )
                         continue
                 finalize_manual_pull_if_complete()
         except Exception:
-            pass
+            logger.exception("Background refresh loop failed")
         time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
@@ -915,6 +1400,7 @@ def start_background_refresher() -> None:
         thread = threading.Thread(target=background_refresh_loop, daemon=True)
         thread.start()
         REFRESHER_STARTED = True
+        logger.info("Background refresher started with %s second interval", BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
 @app.before_request
@@ -950,24 +1436,28 @@ def switch_overview():
 
 @app.route("/pull")
 def manual_pull():
+    saved_characters = get_saved_characters()
+    if not saved_characters:
+        return redirect(url_for("index", error="No linked characters available for this dashboard."))
+
     if not can_manual_pull():
         return redirect(url_for("index", error="Manual pull is on cooldown. Please wait a moment."))
 
-    for character in get_saved_characters():
+    for character in saved_characters:
         request_dashboard_refresh(character["character_id"])
 
     set_app_state("manual_pull_in_progress", "1")
     set_app_state("last_manual_pull_completed_at", None)
+    logger.info("Manual ESI pull requested for %s linked characters", len(saved_characters))
     return redirect(url_for("index"))
 
 
 @app.route("/logout")
 def logout():
-    get_db().execute("DELETE FROM characters")
-    get_db().commit()
+    logger.info("User signed out of current dashboard session")
     session.clear()
     return redirect(url_for("index"))
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=env_flag("DEBUG", False))

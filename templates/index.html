@@ -503,7 +503,7 @@
         <div class="actions">
           <a class="button {% if manual_pull_in_progress %}pulling disabled{% elif not manual_pull_enabled %}disabled{% endif %}" href="{{ url_for('manual_pull') }}">{% if manual_pull_in_progress %}Pulling ESI{% else %}Pull ESI{% endif %}</a>
           <a class="button" href="{{ url_for('login') }}">Add Character</a>
-          <a class="button secondary" href="{{ url_for('logout') }}">Disconnect All</a>
+          <a class="button secondary" href="{{ url_for('logout') }}">Sign Out</a>
         </div>
       {% endif %}
     </div>
@@ -682,6 +682,19 @@
                 {% else %}
                   <p>No journal entries available yet.</p>
                 {% endif %}
+                {% if location_summary.journal_status %}
+                  <div style="margin-top: 16px;">
+                    <p class="cache-note">
+                      Newest entry
+                      {{ location_summary.journal_status.newest_entry_time | eve_time if location_summary.journal_status.newest_entry_time else "Unknown" }}.
+                      Estimated freshness lag
+                      {{ location_summary.journal_status.freshness_lag_minutes ~ " minutes" if location_summary.journal_status.freshness_lag_minutes is not none else "Unknown" }}.
+                      ESI expires
+                      {{ location_summary.journal_status.esi_expires | eve_time if location_summary.journal_status.esi_expires else "Unknown" }}.
+                    </p>
+
+                  </div>
+                {% endif %}
               </section>
 
               <section class="panel">
@@ -746,5 +759,12 @@
 
     <p class="version-note">Version {{ app_version }}</p>
   </main>
+  {% if manual_pull_in_progress %}
+    <script>
+      window.setTimeout(function () {
+        window.location.reload();
+      }, 5000);
+    </script>
+  {% endif %}
 </body>
 </html>
