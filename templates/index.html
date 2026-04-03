@@ -142,6 +142,87 @@
       background: var(--panel-strong);
     }
 
+    .landing-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .landing-copy {
+      display: grid;
+      gap: 20px;
+    }
+
+    .landing-lead {
+      max-width: 60ch;
+      font-size: 1.02rem;
+    }
+
+    .feature-list,
+    .step-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .feature-card,
+    .step-card {
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+    }
+
+    .feature-card strong,
+    .step-card strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--text);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 0.82rem;
+    }
+
+    .cta-panel {
+      position: sticky;
+      top: 24px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .cta-panel .button {
+      width: 100%;
+      text-align: center;
+    }
+
+    .cta-kicker {
+      margin: 0;
+      color: var(--accent);
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .support-copy {
+      margin: 0;
+      font-size: 0.92rem;
+    }
+
+    .inline-code-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .inline-code-list code {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
     .dashboard {
       display: grid;
       gap: 18px;
@@ -176,13 +257,19 @@
     .character-tabs {
       display: flex;
       gap: 10px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 6px;
       margin-bottom: 20px;
+      scrollbar-width: thin;
     }
 
     .character-tab {
       display: inline-flex;
       align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
       padding: 10px 16px;
       border-radius: 999px;
       border: 1px solid var(--border);
@@ -202,6 +289,45 @@
       color: #111;
       background: var(--accent);
       border-color: transparent;
+    }
+
+    .tab-name {
+      white-space: nowrap;
+    }
+
+    .tab-badges {
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .tab-badge.muted {
+      color: var(--muted);
+    }
+
+    .character-tab.active .tab-badge {
+      background: rgba(17, 17, 17, 0.08);
+      border-color: rgba(17, 17, 17, 0.12);
+      color: #111;
+    }
+
+    .character-tab.active .tab-badge.muted {
+      color: rgba(17, 17, 17, 0.68);
     }
 
     .pilot-card {
@@ -415,20 +541,11 @@
       }
 
       .character-tabs {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        overflow-y: hidden;
-        padding-bottom: 6px;
         margin-bottom: 12px;
-        scrollbar-width: thin;
-      }
-
-      .character-tab {
-        flex: 0 0 auto;
-        white-space: nowrap;
       }
 
       .summary-grid,
+      .landing-grid,
       .pi-grid,
       .colony-grid {
         grid-template-columns: 1fr;
@@ -486,6 +603,10 @@
         height: 72px;
         border-radius: 16px;
       }
+
+      .cta-panel {
+        position: static;
+      }
     }
 
     @media (max-width: 1180px) {
@@ -536,11 +657,11 @@
           <nav class="character-tabs" aria-label="Characters">
             <form class="inline-form" method="post" action="{{ url_for('switch_overview') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <button
-                type="submit"
-                class="character-tab {{ 'active' if active_character_id == 'overview' else '' }}"
-              >
-                Overview
+                <button
+                  type="submit"
+                  class="character-tab {{ 'active' if active_character_id == 'overview' else '' }}"
+                >
+                  <span class="tab-name">Overview</span>
               </button>
             </form>
             {% for character in characters %}
@@ -550,7 +671,14 @@
                   type="submit"
                   class="character-tab {{ 'active' if character.character_id == active_character_id else '' }}"
                 >
-                  {{ character.character_name }}
+                  <span class="tab-name">{{ character.character_name }}</span>
+                  {% if character.tab_badges %}
+                    <span class="tab-badges">
+                      {% for badge in character.tab_badges[:2] %}
+                        <span class="tab-badge {{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </span>
+                  {% endif %}
                 </button>
               </form>
             {% endfor %}
@@ -766,16 +894,64 @@
         {% endif %}
       </div>
     {% else %}
-      <div class="actions">
-        <a class="button" href="{{ url_for('login') }}">Login With EVE Online</a>
-      </div>
+      <section class="landing-grid">
+        <div class="landing-copy">
+          <div class="panel">
+            <p class="eyebrow">Built For Capsuleers</p>
+            <h2 class="section-title" style="font-size: 1.3rem; margin-bottom: 10px;">One place for your pilots, wallets, and PI timers</h2>
+            <p class="landing-lead">EVE Command Panel gives you a cleaner view of the information that matters most when you are managing multiple characters: where they are, what their wallet has been doing, and which colonies need attention next.</p>
+          </div>
 
-      <div class="panel">
-        <p>Before logging in, create an app in the EVE developer portal and set:</p>
-        <p><code>EVE_CLIENT_ID</code>, <code>EVE_CLIENT_SECRET</code>, <code>EVE_REDIRECT_URI</code>, and <code>FLASK_SECRET_KEY</code>.</p>
-        <p>Required scopes: <code>esi-location.read_location.v1</code>, <code>esi-wallet.read_character_wallet.v1</code>, and <code>esi-planets.manage_planets.v1</code>.</p>
-        <p>Once one character is connected, you can use <strong>Add Character</strong> to create more tabs.</p>
-      </div>
+          <div class="feature-list">
+            <div class="feature-card">
+              <strong>Multi-Character View</strong>
+              <p>Switch between linked pilots quickly, or use the overview to scan who needs attention first.</p>
+            </div>
+            <div class="feature-card">
+              <strong>Planetary Industry Timing</strong>
+              <p>See active colonies, extractor pressure, and next expiry windows without digging through the in-game PI interface.</p>
+            </div>
+            <div class="feature-card">
+              <strong>Wallet Awareness</strong>
+              <p>Track recent journal entries and overall wallet position from the same command surface.</p>
+            </div>
+          </div>
+        </div>
+
+        <aside class="cta-panel">
+          <div class="panel">
+            <p class="cta-kicker">Connect Your First Pilot</p>
+            <p class="support-copy">Sign in with EVE Online to start building your personal dashboard.</p>
+            <div class="actions">
+              <a class="button" href="{{ url_for('login') }}">Connect With EVE Online</a>
+            </div>
+            <p class="support-copy">Your characters are stored locally in your own dashboard database, and you can add more pilots after the first login.</p>
+          </div>
+
+          <div class="panel">
+            <p class="cta-kicker">What You Need</p>
+            <div class="step-list">
+              <div class="step-card">
+                <strong>1. Create an EVE application</strong>
+                <p>Use the EVE developer portal and set the callback URL to <code>http://127.0.0.1:5000/callback</code>.</p>
+              </div>
+              <div class="step-card">
+                <strong>2. Add your local credentials</strong>
+                <p>Fill in your local <code>.env</code> with your client ID, client secret, redirect URI, and Flask secret key.</p>
+              </div>
+              <div class="step-card">
+                <strong>3. Approve the required scopes</strong>
+                <div class="inline-code-list">
+                  <code>esi-location.read_location.v1</code>
+                  <code>esi-location.read_ship_type.v1</code>
+                  <code>esi-wallet.read_character_wallet.v1</code>
+                  <code>esi-planets.manage_planets.v1</code>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
     {% endif %}
 
     <p class="version-note">Version {{ app_version }}</p>

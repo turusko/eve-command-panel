@@ -671,20 +671,79 @@ def update_character_tokens(character_id: int, token_data: dict) -> None:
     db.commit()
 
 
+def build_character_tab_badges(payload: dict | None, cached_at: int | None) -> list[dict]:
+    stale_badge = None
+    pi_badge = None
+    security_badge = None
+    now = datetime.now(timezone.utc)
+
+    if payload:
+        security_status = payload.get("solar_system", {}).get("security_status")
+        if security_status is not None:
+            if security_status >= 0.5:
+                security_label = f"HS {security_status:.1f}"
+                security_tone = "security-high"
+            elif security_status > 0:
+                security_label = f"LS {security_status:.1f}"
+                security_tone = "security-low"
+            else:
+                security_label = "NS 0.0"
+                security_tone = "security-null"
+            security_badge = {"label": security_label, "tone": security_tone}
+
+        next_expiry = parse_iso_datetime(payload.get("pi", {}).get("next_expiry"))
+        if next_expiry:
+            remaining_seconds = int((next_expiry - now).total_seconds())
+            if remaining_seconds <= 0:
+                pi_tone = "warning"
+            elif remaining_seconds <= PI_ATTENTION_WINDOW_HOURS * 3600:
+                pi_tone = "security-borderline"
+            else:
+                pi_tone = None
+            if pi_tone:
+                pi_badge = {
+                    "label": f"PI {format_countdown(next_expiry.isoformat().replace('+00:00', 'Z'))}",
+                    "tone": pi_tone,
+                }
+
+    if cached_at is None:
+        stale_badge = {"label": "No Cache", "tone": "security-borderline"}
+    elif int(time.time()) - int(cached_at) >= CACHE_TTL_SECONDS:
+        stale_badge = {"label": "Stale", "tone": "security-borderline"}
+
+    for badge in (stale_badge, pi_badge, security_badge):
+        if badge:
+            return [badge]
+    return []
+
+
 def get_saved_characters() -> list[dict]:
     instance_id = get_instance_id()
     if not instance_id:
         return []
     rows = get_db().execute(
         """
-        SELECT character_id, character_name
-        FROM user_characters
-        WHERE instance_id = ?
-        ORDER BY character_name COLLATE NOCASE
+        SELECT c.character_id, c.character_name, dc.payload_json, dc.fetched_at
+        FROM user_characters c
+        LEFT JOIN user_dashboard_cache dc
+            ON dc.instance_id = c.instance_id AND dc.character_id = c.character_id
+        WHERE c.instance_id = ?
+        ORDER BY c.character_name COLLATE NOCASE
         """,
         (instance_id,),
     ).fetchall()
-    return [dict(row) for row in rows]
+
+    characters = []
+    for row in rows:
+        payload = json.loads(row["payload_json"]) if row["payload_json"] and row["payload_json"] != "{}" else None
+        characters.append(
+            {
+                "character_id": row["character_id"],
+                "character_name": row["character_name"],
+                "tab_badges": build_character_tab_badges(payload, row["fetched_at"]),
+            }
+        )
+    return characters
 
 
 def get_overview_wallet_total() -> float:
