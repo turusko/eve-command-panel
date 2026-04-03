@@ -1444,7 +1444,6 @@ def set_app_state_for_instance(instance_id: str, key: str, value: str | int | No
 def background_refresh_loop():
     lease_held = False
     while True:
-        should_sleep = True
         try:
             with app.app_context():
                 init_db()
@@ -1452,25 +1451,24 @@ def background_refresh_loop():
                     if lease_held:
                         logger.info("Background refresher lease transferred away from %s", REFRESHER_OWNER_ID)
                         lease_held = False
-                    continue
-                if not lease_held:
-                    logger.info("Background refresher lease acquired by %s", REFRESHER_OWNER_ID)
-                    lease_held = True
-                for instance_id, character_id in get_characters_needing_refresh():
-                    try:
-                        refresh_dashboard_cache_for_character(instance_id, character_id)
-                    except Exception:
-                        logger.exception(
-                            "Background refresh failed for instance %s character %s",
-                            instance_id,
-                            character_id,
-                        )
-                        continue
-                finalize_manual_pull_if_complete()
+                else:
+                    if not lease_held:
+                        logger.info("Background refresher lease acquired by %s", REFRESHER_OWNER_ID)
+                        lease_held = True
+                    for instance_id, character_id in get_characters_needing_refresh():
+                        try:
+                            refresh_dashboard_cache_for_character(instance_id, character_id)
+                        except Exception:
+                            logger.exception(
+                                "Background refresh failed for instance %s character %s",
+                                instance_id,
+                                character_id,
+                            )
+                            continue
+                    finalize_manual_pull_if_complete()
         except Exception:
             logger.exception("Background refresh loop failed")
-        if should_sleep:
-            time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
+        time.sleep(BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
 def start_background_refresher() -> None:
