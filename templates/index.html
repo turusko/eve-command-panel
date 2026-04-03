@@ -112,6 +112,12 @@
       border: 1px solid var(--border);
     }
 
+    .button.danger {
+      color: #ffd6d6;
+      background: rgba(255, 93, 93, 0.14);
+      border: 1px solid rgba(255, 93, 93, 0.32);
+    }
+
     .button.disabled {
       pointer-events: none;
       opacity: 0.45;
@@ -124,6 +130,10 @@
 
     .button.secondary:hover {
       background: rgba(255, 255, 255, 0.06);
+    }
+
+    .button.danger:hover {
+      background: rgba(255, 93, 93, 0.22);
     }
 
     @keyframes spin {
@@ -491,6 +501,33 @@
       font-size: 0.92rem;
     }
 
+    .settings-form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .settings-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .settings-select {
+      min-width: 110px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font: inherit;
+    }
+
+    .settings-select option {
+      color: #111;
+      background: #fff;
+    }
+
     .version-note {
       margin-top: 18px;
       color: var(--muted);
@@ -674,7 +711,7 @@
                   <span class="tab-name">{{ character.character_name }}</span>
                   {% if character.tab_badges %}
                     <span class="tab-badges">
-                      {% for badge in character.tab_badges[:2] %}
+                      {% for badge in character.tab_badges %}
                         <span class="tab-badge {{ badge.tone }}">{{ badge.label }}</span>
                       {% endfor %}
                     </span>
@@ -703,6 +740,22 @@
                   <p class="stat-value">{{ overview_summary.total_wallet_balance | isk }}</p>
                 </div>
               </section>
+
+              <div class="panel">
+                <p class="stat-label">PI Attention Window</p>
+                <form class="settings-form" method="post" action="{{ url_for('update_pi_attention_window') }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <div class="settings-row">
+                    <select class="settings-select" name="pi_attention_window_hours">
+                      {% for hour in pi_attention_window_options %}
+                        <option value="{{ hour }}" {% if hour == pi_attention_window_hours %}selected{% endif %}>{{ hour }}h</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit" class="button secondary">Save</button>
+                  </div>
+                  <p class="cache-note">Saved for this dashboard only and used for PI warnings across your linked characters.</p>
+                </form>
+              </div>
             </aside>
 
             <div class="character-main">
@@ -785,6 +838,15 @@
               <div class="panel">
                 <p class="cache-note">Last updated {{ location_summary._cached_at | cache_age if location_summary._cached_at else "live" }}. Next update {{ location_summary._next_update_at | next_update_time if location_summary._next_update_at else "on demand" }}.</p>
               </div>
+
+              <div class="panel">
+                <p class="stat-label">Character Link</p>
+                <form class="settings-form" method="post" action="{{ url_for('remove_character_route', character_id=location_summary.character_id) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="button danger">De-Link This Character</button>
+                  <p class="cache-note">Removes this pilot from the current dashboard only. Other linked characters stay connected.</p>
+                </form>
+              </div>
             </aside>
 
             <div class="character-main">
@@ -859,7 +921,7 @@
                       <p class="stat-value">{{ location_summary.pi.active_extractors }}</p>
                     </div>
                     <div class="panel">
-                      <p class="stat-label">Need Attention (&lt;6h)</p>
+                      <p class="stat-label">Need Attention (&lt;{{ pi_attention_window_hours }}h)</p>
                       <p class="stat-value warning">{{ location_summary.pi.extractors_expiring_soon }}</p>
                     </div>
                     <div class="panel">
