@@ -1929,6 +1929,14 @@ def start_background_refresher() -> None:
         logger.info("Background refresher started with %s second interval", BACKGROUND_REFRESH_INTERVAL_SECONDS)
 
 
+def should_start_background_refresher_on_boot() -> bool:
+    if not env_flag("ENABLE_BACKGROUND_REFRESHER", True):
+        return False
+    if env_flag("DEBUG", False):
+        return os.getenv("WERKZEUG_RUN_MAIN") == "true"
+    return True
+
+
 @app.before_request
 def ensure_background_refresher():
     start_background_refresher()
@@ -2073,6 +2081,10 @@ def logout():
 
 with app.app_context():
     init_db()
+
+
+if should_start_background_refresher_on_boot():
+    start_background_refresher()
 
 
 if __name__ == "__main__":

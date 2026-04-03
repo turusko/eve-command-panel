@@ -224,7 +224,7 @@ APP_PORT=8080 CONTAINER_NAME=eve-dashboard-prod ./scripts/redeploy-linux.sh
 - Authorized characters are stored locally in `eve_dashboard.db` by default, or in the path set by `DATABASE_PATH`.
 - The app writes a rotating log file next to the database by default, or in the path set by `LOG_PATH`.
 - Dashboard data is cached locally for 15 minutes to keep tab switching fast.
-- A background thread checks every 1 minute and refreshes characters whose cache is stale.
+- A background thread checks every 10 seconds and refreshes characters whose cache is stale.
 - PI attention defaults to `PI_ATTENTION_WINDOW_HOURS` from `.env`, and each dashboard can override it in the UI with its own saved 1-24 hour setting.
 - The `/location` route returns the dashboard JSON summary.
 - If your token expires, the app refreshes it automatically using the stored refresh token.
