@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -95,6 +95,9 @@ def env_int(name: str, default: int, minimum: int | None = None, maximum: int | 
     return parsed
 
 
+LOG_BACKUP_DAYS = env_int("LOG_BACKUP_DAYS", 14, minimum=1)
+
+
 PI_ATTENTION_WINDOW_DEFAULT_HOURS = env_int(
     "PI_ATTENTION_WINDOW_HOURS",
     6,
@@ -140,7 +143,14 @@ def configure_logging() -> logging.Logger:
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(threadName)s %(message)s")
 
-    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_048_576, backupCount=3, encoding="utf-8")
+    file_handler = TimedRotatingFileHandler(
+        LOG_PATH,
+        when="midnight",
+        interval=1,
+        backupCount=LOG_BACKUP_DAYS,
+        encoding="utf-8",
+        utc=True,
+    )
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
