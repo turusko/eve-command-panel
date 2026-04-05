@@ -6,7 +6,7 @@ This Flask app:
 2. Exchanges the authorization code for tokens
 3. Extracts your character ID from the returned access token
 4. Calls ESI to fetch your current character location
-5. Shows wallet balance and the last 5 wallet journal entries
+5. Shows wallet balance, a 24 hour wallet activity summary, and the last 5 wallet journal entries
 6. Shows your PI colonies and which ones need attention soon
 7. Saves multiple characters locally so you can switch between them with tabs
 8. Caches each character dashboard locally and refreshes it in the background
@@ -182,7 +182,7 @@ Open `http://127.0.0.1:5000`.
 ### Docker Notes
 
 - The database file will be stored on your machine in `./data/eve_dashboard.db`.
-- The app log file will be stored on your machine in `./data/eve_dashboard.log`.
+- The app log file will be stored on your machine in `./data/eve_dashboard.log`, with daily rollover files alongside it.
 - Because the database is bind-mounted from the host, your characters and cache survive container restarts and container deletion.
 - Because the log file is also bind-mounted from the host, refresh errors and app events are still available after container restarts.
 - If you remove the `data` folder, you remove the saved database too.
@@ -222,7 +222,9 @@ APP_PORT=8080 CONTAINER_NAME=eve-dashboard-prod ./scripts/redeploy-linux.sh
 
 - This app uses the server-side authorization code flow with your client secret.
 - Authorized characters are stored locally in `eve_dashboard.db` by default, or in the path set by `DATABASE_PATH`.
-- The app writes a rotating log file next to the database by default, or in the path set by `LOG_PATH`.
+- Wallet journal entries are stored locally and retained over time by character, with duplicate protection based on the ESI journal entry ID.
+- The app writes a daily rotating log file next to the database by default, or in the path set by `LOG_PATH`.
+- Daily log retention defaults to 14 files and can be changed with `LOG_BACKUP_DAYS` in `.env`.
 - Dashboard data is cached locally for 15 minutes to keep tab switching fast.
 - A background thread checks every 10 seconds and refreshes characters whose cache is stale.
 - PI attention defaults to `PI_ATTENTION_WINDOW_HOURS` from `.env`, and each dashboard can override it in the UI with its own saved 1-24 hour setting.
