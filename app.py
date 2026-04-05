@@ -33,6 +33,9 @@ BACKGROUND_REFRESH_LEASE_SECONDS = 3 * BACKGROUND_REFRESH_INTERVAL_SECONDS
 MANUAL_PULL_COOLDOWN_SECONDS = 60
 BACKGROUND_REFRESH_REQUEST_WAKE_WINDOW_SECONDS = 15
 BACKGROUND_REFRESH_REQUEST_POLL_SECONDS = 5
+WALLET_JOURNAL_DISPLAY_LIMIT = 5
+WALLET_JOURNAL_CACHE_LIMIT = 100
+WALLET_ACTIVITY_WINDOW_HOURS = 24
 SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "30"))
 CSRF_SESSION_KEY = "csrf_token"
 REFRESHER_LEASE_KEY = "background_refresher_lease"
@@ -384,12 +387,26 @@ def get_cached_dashboard(character_id: int):
     if not row:
         return None
     payload = json.loads(row["payload_json"])
-    journal_entries = get_wallet_journal_entries(character_id, instance_id=instance_id, limit=5)
+    journal_entries = get_wallet_journal_entries(
+        character_id,
+        instance_id=instance_id,
+        limit=WALLET_JOURNAL_DISPLAY_LIMIT,
+    )
     if not journal_entries:
         journal_entries = payload.get("journal_entries", [])
         if journal_entries:
             replace_wallet_journal_entries(instance_id, character_id, journal_entries)
     payload["journal_entries"] = journal_entries
+    payload.setdefault(
+        "wallet_activity_24h",
+        build_wallet_activity_summary(
+            get_wallet_journal_entries(
+                character_id,
+                instance_id=instance_id,
+                limit=WALLET_JOURNAL_CACHE_LIMIT,
+            )
+        ),
+    )
     pi_summary = payload.get("pi")
     if pi_summary:
         pi_summary["extractors_expiring_soon"] = count_colonies_needing_attention(
@@ -862,6 +879,39 @@ def get_overview_wallet_total() -> float:
     return total
 
 
+def build_wallet_activity_summary(
+    journal_entries: list[dict],
+    window_hours: int = WALLET_ACTIVITY_WINDOW_HOURS,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=window_hours)
+    positive_total = 0.0
+    negative_total = 0.0
+    entry_count = 0
+
+    for entry in journal_entries:
+        entry_dt = parse_iso_datetime(entry.get("date"))
+        if entry_dt is None or entry_dt < cutoff:
+            continue
+        amount = entry.get("amount")
+        if amount is None:
+            continue
+        amount_value = float(amount)
+        entry_count += 1
+        if amount_value >= 0:
+            positive_total += amount_value
+        else:
+            negative_total += amount_value
+
+    return {
+        "window_hours": window_hours,
+        "entries": entry_count,
+        "earned": positive_total,
+        "lost": negative_total,
+        "net": positive_total + negative_total,
+    }
+
+
 def get_overview_character_summaries() -> list[dict]:
     instance_id = get_instance_id()
     if not instance_id:
@@ -1202,7 +1252,10 @@ def fetch_wallet_balance(character_auth: dict) -> float:
     return response.json()
 
 
-def fetch_wallet_journal(character_auth: dict, limit: int = 5) -> tuple[list[dict], dict]:
+def fetch_wallet_journal(
+    character_auth: dict,
+    limit: int = WALLET_JOURNAL_CACHE_LIMIT,
+) -> tuple[list[dict], dict]:
     character_id = character_auth["character_id"]
     response = requests.get(
         f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
@@ -1452,7 +1505,7 @@ def build_location_summary(character_auth: dict, attention_window_hours: int) ->
         "wallet_journal",
         fetch_wallet_journal,
         character_auth,
-        5,
+        WALLET_JOURNAL_CACHE_LIMIT,
     )
     colonies = log_refresh_step(character_id, "planetary_colonies", fetch_planetary_colonies, character_auth)
 
@@ -1472,6 +1525,7 @@ def build_location_summary(character_auth: dict, attention_window_hours: int) ->
         "wallet_balance": wallet_balance,
         "journal_entries": journal_entries,
         "journal_status": build_wallet_journal_status(journal_entries, journal_metadata),
+        "wallet_activity_24h": build_wallet_activity_summary(journal_entries),
         "pi": log_refresh_step(
             character_id,
             f"pi_summary:{len(colonies)}_colonies",
@@ -1643,10 +1697,6 @@ def replace_wallet_journal_entries(
     instance_id: str, character_id: int, journal_entries: list[dict]
 ) -> None:
     db = get_db()
-    db.execute(
-        "DELETE FROM user_wallet_journal WHERE instance_id = ? AND character_id = ?",
-        (instance_id, character_id),
-    )
     for entry in journal_entries:
         entry_id = entry.get("id")
         entry_date = entry.get("date")
@@ -1658,6 +1708,13 @@ def replace_wallet_journal_entries(
                 instance_id, character_id, entry_id, entry_date, ref_type, amount, balance, description, raw_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instance_id, character_id, entry_id) DO UPDATE SET
+                entry_date = excluded.entry_date,
+                ref_type = excluded.ref_type,
+                amount = excluded.amount,
+                balance = excluded.balance,
+                description = excluded.description,
+                raw_json = excluded.raw_json
             """,
             (
                 instance_id,

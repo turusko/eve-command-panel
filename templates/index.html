@@ -856,6 +856,19 @@
             </aside>
 
             <div class="character-main">
+              {% if location_summary.wallet_activity_24h %}
+                <section class="panel wallet-panel">
+                  <p class="stat-label">Wallet 24h Net</p>
+                  <p class="stat-value {{ 'amount-negative' if location_summary.wallet_activity_24h.net < 0 else 'amount-positive' }}">
+                    {{ location_summary.wallet_activity_24h.net | isk }}
+                  </p>
+                  <p class="cache-note">
+                    Earned {{ location_summary.wallet_activity_24h.earned | isk }}.
+                    Lost {{ (-location_summary.wallet_activity_24h.lost) | isk }}.
+                    {{ location_summary.wallet_activity_24h.entries }} journal entries in the last {{ location_summary.wallet_activity_24h.window_hours }}h.
+                  </p>
+                </section>
+              {% endif %}
               <section class="panel">
                 <h2 class="section-title">Last 5 Wallet Journal Entries</h2>
                 {% if location_summary.journal_entries %}
