@@ -34,7 +34,6 @@ MANUAL_PULL_COOLDOWN_SECONDS = 60
 BACKGROUND_REFRESH_REQUEST_WAKE_WINDOW_SECONDS = 15
 BACKGROUND_REFRESH_REQUEST_POLL_SECONDS = 5
 WALLET_JOURNAL_DISPLAY_LIMIT = 5
-WALLET_JOURNAL_CACHE_LIMIT = 100
 WALLET_ACTIVITY_WINDOW_HOURS = 24
 SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "30"))
 CSRF_SESSION_KEY = "csrf_token"
@@ -96,6 +95,7 @@ def env_int(name: str, default: int, minimum: int | None = None, maximum: int | 
 
 
 LOG_BACKUP_DAYS = env_int("LOG_BACKUP_DAYS", 14, minimum=1)
+WALLET_JOURNAL_CACHE_LIMIT = env_int("WALLET_JOURNAL_CACHE_LIMIT", 1000, minimum=1)
 
 
 PI_ATTENTION_WINDOW_DEFAULT_HOURS = env_int(
@@ -1267,28 +1267,67 @@ def fetch_wallet_journal(
     limit: int = WALLET_JOURNAL_CACHE_LIMIT,
 ) -> tuple[list[dict], dict]:
     character_id = character_auth["character_id"]
-    response = requests.get(
-        f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
-        params={"page": 1},
-        headers=get_esi_headers(character_auth["access_token"]),
-        timeout=15,
-    )
-    response.raise_for_status()
-    entries = response.json()
+    entries: list[dict] = []
+    total_pages = None
+    pages_fetched = 0
+    first_response = None
+    fallback_max_pages = 1
+
+    for page in range(1, limit + 1):
+        response = requests.get(
+            f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
+            params={"page": page},
+            headers=get_esi_headers(character_auth["access_token"]),
+            timeout=15,
+        )
+        response.raise_for_status()
+        if first_response is None:
+            first_response = response
+        page_entries = response.json()
+        if not page_entries:
+            break
+
+        entries.extend(page_entries)
+        pages_fetched += 1
+
+        x_pages_header = response.headers.get("X-Pages")
+        if x_pages_header:
+            try:
+                total_pages = max(1, int(x_pages_header))
+            except ValueError:
+                total_pages = None
+
+        if total_pages is None and page == 1:
+            fallback_max_pages = max(1, math.ceil(limit / max(1, len(page_entries))))
+
+        if len(entries) >= limit:
+            break
+        if total_pages is not None and page >= total_pages:
+            break
+        if total_pages is None and page >= fallback_max_pages:
+            break
+
     entries.sort(key=lambda entry: (entry.get("date", ""), entry.get("id", 0)), reverse=True)
     newest_entry_time = entries[0].get("date") if entries else None
+    response_headers = first_response.headers if first_response is not None else {}
     metadata = {
-        "esi_expires": response.headers.get("Expires"),
-        "esi_cache_control": response.headers.get("Cache-Control"),
-        "esi_last_modified": response.headers.get("Last-Modified"),
-        "esi_etag": response.headers.get("ETag"),
-        "esi_response_date": response.headers.get("Date"),
+        "esi_expires": response_headers.get("Expires"),
+        "esi_cache_control": response_headers.get("Cache-Control"),
+        "esi_last_modified": response_headers.get("Last-Modified"),
+        "esi_etag": response_headers.get("ETag"),
+        "esi_response_date": response_headers.get("Date"),
         "newest_entry_time": newest_entry_time,
+        "pages_fetched": pages_fetched,
+        "total_pages": total_pages,
+        "entries_fetched": len(entries),
     }
     logger.info(
-        "Wallet journal fetch for %s: newest=%s expires=%s cache_control=%s last_modified=%s etag=%s",
+        "Wallet journal fetch for %s: newest=%s entries=%s pages=%s/%s expires=%s cache_control=%s last_modified=%s etag=%s",
         character_id,
         metadata["newest_entry_time"],
+        metadata["entries_fetched"],
+        metadata["pages_fetched"],
+        metadata["total_pages"],
         metadata["esi_expires"],
         metadata["esi_cache_control"],
         metadata["esi_last_modified"],
@@ -1707,6 +1746,13 @@ def replace_wallet_journal_entries(
     instance_id: str, character_id: int, journal_entries: list[dict]
 ) -> None:
     db = get_db()
+    db.execute(
+        """
+        DELETE FROM user_wallet_journal
+        WHERE instance_id = ? AND character_id = ?
+        """,
+        (instance_id, character_id),
+    )
     for entry in journal_entries:
         entry_id = entry.get("id")
         entry_date = entry.get("date")

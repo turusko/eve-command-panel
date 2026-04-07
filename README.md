@@ -137,6 +137,9 @@ Copy `.env.example` to `.env` and fill in your EVE SSO credentials:
 Copy-Item .env.example .env
 ```
 
+If you want to keep a deeper wallet history locally, set `WALLET_JOURNAL_CACHE_LIMIT` in `.env`.
+The default is `1000`, and the app now paginates through the ESI wallet journal instead of storing only the first page.
+
 ## Run
 
 ```powershell
