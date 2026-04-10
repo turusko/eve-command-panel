@@ -827,6 +827,10 @@ def build_character_tab_badges(
     elif int(time.time()) - int(cached_at) >= CACHE_TTL_SECONDS:
         stale_badge = {"label": "Stale", "tone": "security-borderline"}
 
+    # When PI timer warning is active, prioritize that signal over system security.
+    if pi_badge:
+        security_badge = None
+
     return [badge for badge in (stale_badge, pi_badge, security_badge) if badge]
 
 
