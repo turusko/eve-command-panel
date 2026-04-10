@@ -814,16 +814,12 @@ def build_character_tab_badges(
         next_expiry = parse_iso_datetime(payload.get("pi", {}).get("next_expiry"))
         if next_expiry:
             remaining_seconds = int((next_expiry - now).total_seconds())
-            if remaining_seconds <= 0:
-                pi_tone = "warning"
-            elif remaining_seconds <= attention_window_hours * 3600:
-                pi_tone = "security-borderline"
-            else:
-                pi_tone = None
-            if pi_tone:
+            is_expired = remaining_seconds <= 0
+            is_within_attention_window = 0 < remaining_seconds <= attention_window_hours * 3600
+            if is_expired or is_within_attention_window:
                 pi_badge = {
                     "label": f"PI {format_countdown(next_expiry.isoformat().replace('+00:00', 'Z'))}",
-                    "tone": pi_tone,
+                    "tone": "warning" if is_expired else "security-borderline",
                 }
 
     if cached_at is None:
