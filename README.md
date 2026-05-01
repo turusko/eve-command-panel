@@ -149,6 +149,20 @@ python app.py
 
 Open `http://127.0.0.1:5000`.
 
+## Render deployment note
+
+If you deploy to Render, do not rely on a local `.env` file on your computer.
+Render must receive these values as service environment variables (or through a secret file mounted at `/etc/secrets/.env`):
+
+- `EVE_CLIENT_ID`
+- `EVE_CLIENT_SECRET`
+- `EVE_REDIRECT_URI`
+- `FLASK_SECRET_KEY`
+
+Your EVE developer app callback URL must exactly match `EVE_REDIRECT_URI` (including `https` and path), for example:
+
+`https://eve-command-panel.onrender.com/callback`
+
 ## Docker
 
 You can also run the app with Docker.
