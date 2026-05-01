@@ -19,7 +19,19 @@ from dotenv import load_dotenv
 from flask import Flask, g, redirect, render_template, request, session, url_for
 
 
-load_dotenv()
+def load_environment() -> None:
+    """Load environment variables from common local and hosted deployment paths."""
+    dotenv_candidates = (
+        Path(".env"),
+        Path(__file__).with_name(".env"),
+        Path("/etc/secrets/.env"),
+    )
+    for dotenv_path in dotenv_candidates:
+        if dotenv_path.exists():
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+
+
+load_environment()
 
 
 SSO_METADATA_URL = "https://login.eveonline.com/.well-known/oauth-authorization-server"
